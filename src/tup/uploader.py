@@ -179,6 +179,61 @@ def extract_file_id(message: Message, kind: MediaKind) -> str:
     raise TupError("Telegram response did not include a file_id.")
 
 
+async def copy_by_file_id(
+    bot: Bot, chat_id: str, file_id: str, caption: str, *, max_retries: int
+) -> Message:
+    """Server-side duplication via send_document(file_id) — no re-upload (spec §7)."""
+    try:
+        return await send_with_retry(
+            lambda: bot.send_document(chat_id=chat_id, document=file_id, caption=caption),
+            max_retries=max_retries,
+            what="copy",
+        )
+    except Forbidden as exc:
+        raise access_error(chat_id) from exc
+    except BadRequest as exc:
+        raise TupError(f"Telegram rejected the copy: {exc}") from exc
+
+
+async def edit_caption(
+    bot: Bot, chat_id: str, message_id: int, caption: str, *, max_retries: int
+) -> None:
+    """Edit a message caption; 'message is not modified' counts as success."""
+    try:
+        await send_with_retry(
+            lambda: bot.edit_message_caption(
+                chat_id=chat_id, message_id=message_id, caption=caption
+            ),
+            max_retries=max_retries,
+            what="edit caption",
+        )
+    except Forbidden as exc:
+        raise access_error(chat_id) from exc
+    except BadRequest as exc:
+        if "not modified" in str(exc).lower():
+            return
+        raise TupError(f"Could not edit caption of message {message_id}: {exc}") from exc
+
+
+async def delete_remote_message(
+    bot: Bot, chat_id: str, message_id: int, *, max_retries: int
+) -> bool:
+    """Delete a message; returns False when it was already gone."""
+    try:
+        await send_with_retry(
+            lambda: bot.delete_message(chat_id=chat_id, message_id=message_id),
+            max_retries=max_retries,
+            what="delete message",
+        )
+    except Forbidden as exc:
+        raise access_error(chat_id) from exc
+    except BadRequest as exc:
+        if "not found" in str(exc).lower() or "message to delete" in str(exc).lower():
+            return False
+        raise TupError(f"Could not delete message {message_id}: {exc}") from exc
+    return True
+
+
 def _stat_upload_size(local_path: Path) -> int:
     if not local_path.is_file():
         raise TupError(f"Not a file: {local_path}")
