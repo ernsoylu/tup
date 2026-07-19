@@ -874,6 +874,7 @@ def chat_discover() -> None:
     async def _run() -> None:
         settings = Settings.load()
         chats: dict[int, tuple[str, str]] = {}
+        webhook_url = ""
         async with bot_session(settings) as bot:
             # No offset: peeking does not consume updates, so `tup index`
             # still sees them later.
@@ -887,6 +888,8 @@ def chat_discover() -> None:
                     "my_chat_member",
                 ],
             )
+            if not updates:
+                webhook_url = (await bot.get_webhook_info()).url or ""
         for update in updates:
             chat = update.effective_chat
             if chat is None:
@@ -894,9 +897,23 @@ def chat_discover() -> None:
             title = chat.title or chat.full_name or chat.username or "-"
             chats[chat.id] = (chat.type, title)
         if not chats:
+            if webhook_url:
+                raise TupError(
+                    f"A webhook is set ({webhook_url}); it intercepts all updates, so "
+                    "getUpdates-based discovery sees nothing.",
+                    hint="Remove it via https://api.telegram.org/bot<token>/deleteWebhook "
+                    "and re-run discover.",
+                )
             console.print(
-                "No chats visible yet. Add the bot to a group/channel (admin for "
-                "channels), send any message there, and re-run [bold]tup chat discover[/bold]."
+                "No chats visible yet. Checklist:\n"
+                "  • Groups: bots don't receive plain messages while [bold]group privacy[/bold] "
+                "is on (the default). Send a [bold]command[/bold] like /start in the group, "
+                "or disable privacy via @BotFather (/mybots → Bot Settings → Group Privacy) "
+                "and re-add the bot.\n"
+                "  • Channels: the bot must be an [bold]Administrator[/bold]; then post anything.\n"
+                "  • Your own ID: open a direct chat with the bot and send /start.\n"
+                "  • Telegram drops undelivered updates after ~24h — send a fresh message, "
+                "then re-run [bold]tup chat discover[/bold]."
             )
             return
         table = Table("Chat ID", "Type", "Title")

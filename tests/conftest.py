@@ -125,6 +125,11 @@ def telegram_api() -> Iterator[respx.MockRouter]:
         router.post(url__regex=_BASE + "/getUpdates", name="getUpdates").mock(
             return_value=tg_json([])
         )
+        router.post(url__regex=_BASE + "/getWebhookInfo", name="getWebhookInfo").mock(
+            return_value=tg_json(
+                {"url": "", "has_custom_certificate": False, "pending_update_count": 0}
+            )
+        )
         yield router
 
 

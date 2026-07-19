@@ -59,4 +59,22 @@ def test_discover_with_no_updates_gives_guidance(
 ) -> None:
     result = runner.invoke(app, ["chat", "discover"])
     assert result.exit_code == 0
-    assert "Add the bot" in result.output
+    assert "group privacy" in result.output  # the usual culprit is named explicitly
+    assert "/start" in result.output
+
+
+def test_discover_flags_configured_webhook(fake_env: str, telegram_api: respx.MockRouter) -> None:
+    telegram_api["getWebhookInfo"].mock(
+        return_value=tg_json(
+            {
+                "url": "https://example.com/hook",
+                "has_custom_certificate": False,
+                "pending_update_count": 0,
+            }
+        )
+    )
+    result = runner.invoke(app, ["chat", "discover"])
+    assert result.exit_code == 1
+    combined = result.output + (result.stderr or "")
+    assert "webhook" in combined
+    assert "deleteWebhook" in combined
