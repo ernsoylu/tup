@@ -158,6 +158,21 @@ def setup_cmd() -> None:
         raise typer.Exit(code=1) from exc
 
 
+@app.command("gui")
+def gui_cmd() -> None:
+    """Launch the graphical file explorer (requires the PyQt6 'gui' extra)."""
+    try:
+        from tup.gui.app import run_gui
+    except ImportError as exc:
+        fail(
+            "The GUI requires PyQt6, which is not installed.",
+            hint="Install it with [bold]uv sync --all-extras[/bold] "
+            "or [bold]pip install 'tup[gui]'[/bold].",
+        )
+        raise typer.Exit(code=1) from exc
+    run_gui()
+
+
 # --- chat alias management ----------------------------------------------------
 
 

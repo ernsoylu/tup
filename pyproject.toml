@@ -18,6 +18,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+gui = [
+    "PyQt6>=6.6",
+]
 dev = [
     "ruff>=0.4.0",
     "mypy>=1.10.0",
@@ -30,6 +33,7 @@ test = [
 
 [project.scripts]
 tup = "tup.cli:app"
+tup-gui = "tup.gui.app:run_gui"
 
 [build-system]
 requires = ["hatchling"]
@@ -48,6 +52,11 @@ ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101"]
+# Qt test helpers set QT_QPA_PLATFORM before any PyQt6 import can happen
+"tests/_qt.py" = ["E402"]
+"tests/test_gui_*" = ["E402"]
+# Qt overrides (rowCount, headerData, dragEnterEvent, ...) are camelCase by API contract
+"src/tup/gui/**" = ["N802", "N803", "N815"]
 
 [tool.mypy]
 python_version = "3.12"
