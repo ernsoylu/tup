@@ -21,37 +21,44 @@ class SetupRequiredError(RuntimeError):
 
 
 def config_dir() -> Path:
-    """tup's home directory (~/.tui): .env, registry.db, logs, session, and the
+    """tup's home directory (~/.tup): .env, registry.db, logs, session, and the
     per-drive download cache all live here. Overridable via TUP_CONFIG_DIR."""
     override = os.environ.get("TUP_CONFIG_DIR")
     if override:
         return Path(override).expanduser()
-    return Path("~/.tui").expanduser()
+    return Path("~/.tup").expanduser()
 
 
 def migrate_legacy_config(legacy: Path | None = None, target: Path | None = None) -> list[str]:
-    """One-time move of pre-0.3 files from ~/.config/tup into ~/.tui.
+    """One-time move of files from older homes (~/.tui, ~/.config/tup) into ~/.tup.
 
-    Only moves files that don't already exist at the destination; returns the
-    names moved. A no-op once the migration has happened (or when the config
-    dir is overridden without explicit paths, as in tests).
+    Moves tup's known files plus per-drive cache directories, never
+    overwriting existing destinations; returns the names moved. A no-op once
+    the migration has happened (or when the config dir is overridden without
+    explicit paths, as in tests).
     """
-    if legacy is None:
-        legacy = Path("~/.config/tup").expanduser()
-        if os.environ.get("TUP_CONFIG_DIR"):
-            return []
     if target is None:
         target = config_dir()
-    if not legacy.is_dir() or legacy == target:
-        return []
+    if legacy is not None:
+        candidates = [legacy]
+    else:
+        if os.environ.get("TUP_CONFIG_DIR"):
+            return []
+        candidates = [Path("~/.tui").expanduser(), Path("~/.config/tup").expanduser()]
     moved: list[str] = []
-    for name in _HOME_FILES:
-        source = legacy / name
-        destination = target / name
-        if source.is_file() and not destination.exists():
+    for candidate in candidates:
+        if not candidate.is_dir() or candidate == target:
+            continue
+        for source in sorted(candidate.iterdir()):
+            # Known files plus cache directories (named after chat ids).
+            if source.is_file() and source.name not in _HOME_FILES:
+                continue
+            destination = target / source.name
+            if destination.exists():
+                continue
             target.mkdir(parents=True, exist_ok=True)
             shutil.move(str(source), str(destination))
-            moved.append(name)
+            moved.append(source.name)
     return moved
 
 

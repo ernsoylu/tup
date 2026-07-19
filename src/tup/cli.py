@@ -41,6 +41,7 @@ from tup.uploader import (
 from tup.utils import (
     SecretScrubberFormatter,
     VfsPathError,
+    is_hidden_within,
     normalize_vfs_path,
     sha256_file,
     split_vfs_path,
@@ -52,7 +53,7 @@ state: dict[str, bool] = {"debug": False}
 
 
 def setup_logging(level: str = "INFO") -> None:
-    """Rich stderr logging plus scrubbed JSON-lines at ~/.tui/tup.log."""
+    """Rich stderr logging plus scrubbed JSON-lines at ~/.tup/tup.log."""
     root = logging.getLogger("tup")
     root.setLevel(level)
     root.handlers.clear()
@@ -144,9 +145,7 @@ def main(
     moved = migrate_legacy_config()
     setup_logging("DEBUG" if debug else "INFO")
     if moved:
-        error_console.print(
-            f"📦 Moved {', '.join(moved)} from ~/.config/tup to ~/.tui (tup's new home)."
-        )
+        error_console.print(f"📦 Moved {', '.join(moved)} into ~/.tup (tup's home).")
 
 
 # --- setup --------------------------------------------------------------------
@@ -269,8 +268,8 @@ def _collect_targets(local: Path, dest: str) -> list[tuple[Path, str]]:
     mount = normalize_vfs_path(dest, directory=True) + local.name
     targets = []
     for file_path in sorted(local.rglob("*")):
-        if not file_path.is_file():
-            continue
+        if not file_path.is_file() or is_hidden_within(file_path, local):
+            continue  # dotfiles/.git/.DS_Store never become drive content
         rel = file_path.parent.relative_to(local).as_posix()
         targets.append((file_path, mount if rel == "." else f"{mount}/{rel}"))
     if not targets:
@@ -642,8 +641,8 @@ def _collect_sync_targets(local_dir: Path, remote_base: str) -> list[tuple[Path,
     """S3-style: the *contents* of local_dir map into remote_base."""
     targets = []
     for file_path in sorted(local_dir.rglob("*")):
-        if not file_path.is_file():
-            continue
+        if not file_path.is_file() or is_hidden_within(file_path, local_dir):
+            continue  # dotfiles/.git/.DS_Store never become drive content
         rel = file_path.parent.relative_to(local_dir).as_posix()
         dest = (
             remote_base

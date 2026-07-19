@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
-from telegram.error import RetryAfter, TimedOut
+from telegram.error import BadRequest, RetryAfter, TimedOut
 
 from tests.conftest import CHAT_ID, FakeMtprotoClient, make_settings
 from tup.config import Settings
@@ -114,6 +114,22 @@ async def test_network_errors_back_off_exponentially(no_sleep: list[float]) -> N
 
     assert await send_with_retry(op, max_retries=3, what="test") == "ok"
     assert no_sleep == [2.0, 4.0]
+
+
+async def test_bad_request_is_never_retried(no_sleep: list[float]) -> None:
+    """PTB quirk: BadRequest subclasses NetworkError, but a 400 is permanent —
+    it must pass straight through for the caller to translate."""
+    calls = 0
+
+    async def op() -> str:
+        nonlocal calls
+        calls += 1
+        raise BadRequest("Message to delete not found")
+
+    with pytest.raises(BadRequest):
+        await send_with_retry(op, max_retries=3, what="test")
+    assert calls == 1
+    assert no_sleep == []
 
 
 async def test_exhausted_retries_raise_tup_error(no_sleep: list[float]) -> None:

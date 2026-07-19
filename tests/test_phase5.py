@@ -1,4 +1,4 @@
-"""Phase 5: ~/.tui home migration, schema v2 attributes, same-folder SHA dedup."""
+"""Phase 5/6: ~/.tup home migration, schema v2 attributes, same-folder SHA dedup."""
 
 from __future__ import annotations
 
@@ -24,20 +24,24 @@ async def db() -> AsyncIterator[Database]:
         yield database
 
 
-# --- ~/.tui home migration -----------------------------------------------------
+# --- ~/.tup home migration -----------------------------------------------------
 
 
-def test_migrate_legacy_config_moves_files(tmp_path: Path) -> None:
+def test_migrate_legacy_config_moves_files_and_cache_dirs(tmp_path: Path) -> None:
     legacy = tmp_path / "legacy"
     legacy.mkdir()
     (legacy / ".env").write_text("TELEGRAM_BOT_TOKEN=x\n")
     (legacy / "registry.db").write_bytes(b"db")
     (legacy / "unrelated.txt").write_text("stays")
-    target = tmp_path / "tui-home"
+    cache_dir = legacy / "-100123" / "docs"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "a.pdf").write_bytes(b"cached")
+    target = tmp_path / "tup-home"
 
     moved = migrate_legacy_config(legacy, target)
-    assert sorted(moved) == [".env", "registry.db"]
+    assert sorted(moved) == ["-100123", ".env", "registry.db"]
     assert (target / ".env").read_text() == "TELEGRAM_BOT_TOKEN=x\n"
+    assert (target / "-100123" / "docs" / "a.pdf").read_bytes() == b"cached"
     assert not (legacy / ".env").exists()
     assert (legacy / "unrelated.txt").exists()  # only tup's files move
 
@@ -48,7 +52,7 @@ def test_migrate_legacy_config_never_overwrites(tmp_path: Path) -> None:
     legacy = tmp_path / "legacy"
     legacy.mkdir()
     (legacy / ".env").write_text("old")
-    target = tmp_path / "tui-home"
+    target = tmp_path / "tup-home"
     target.mkdir()
     (target / ".env").write_text("new")
 
@@ -156,6 +160,35 @@ async def test_cp_blocks_identical_content_in_destination(db: Database) -> None:
     assert entry is not None
     with pytest.raises(DuplicateFileError, match="identical"):
         await op_cp(db, make_settings(), FakeMtprotoClient(), CHAT_ID, entry, "/backup/")
+
+
+def test_directory_walks_skip_hidden_files(tmp_path: Path) -> None:
+    """OS junk (.DS_Store, .git/) never becomes drive content via folder walks."""
+    from tup.cli import _collect_sync_targets, _collect_targets
+
+    project = tmp_path / "project"
+    (project / ".git").mkdir(parents=True)
+    (project / ".git" / "config").write_bytes(b"x")
+    (project / ".DS_Store").write_bytes(b"junk")
+    (project / "keep.txt").write_bytes(b"ok")
+    (project / "sub").mkdir()
+    (project / "sub" / ".DS_Store").write_bytes(b"junk")
+    (project / "sub" / "nested.txt").write_bytes(b"ok")
+
+    up_files = [p.name for p, _dest in _collect_targets(project, "/")]
+    assert up_files == ["keep.txt", "nested.txt"]
+
+    sync_files = [p.name for p, _dest in _collect_sync_targets(project, "/")]
+    assert sync_files == ["keep.txt", "nested.txt"]
+
+    from tup.gui.transfers import collect_upload_targets
+
+    gui_files = [p.name for p, _dest, _size in collect_upload_targets([project], "/")]
+    assert gui_files == ["keep.txt", "nested.txt"]
+
+    # Explicitly picking a single dotfile is still allowed (deliberate intent).
+    explicit = collect_upload_targets([project / ".DS_Store"], "/")
+    assert [p.name for p, _dest, _size in explicit] == [".DS_Store"]
 
 
 async def test_transfer_queue_marks_duplicates_skipped() -> None:

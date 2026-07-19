@@ -112,6 +112,16 @@ def split_vfs_path(path: str) -> tuple[str, str]:
     return virtual_path, name
 
 
+def is_hidden_within(path: Path, root: Path) -> bool:
+    """True when any component of `path` below `root` starts with a dot.
+
+    Used by directory walks (up <folder>, sync, GUI drops) to keep OS junk
+    like .DS_Store or .git/ out of the drive. Explicit single-file uploads
+    bypass this check.
+    """
+    return any(part.startswith(".") for part in path.relative_to(root).parts)
+
+
 def mask_token(token: str) -> str:
     """Mask a secret for CLI display: first 4 + '...' + last 4 characters."""
     if len(token) <= 8:

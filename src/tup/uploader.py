@@ -156,6 +156,11 @@ async def send_with_retry[T](
             wait = delay.total_seconds() if isinstance(delay, timedelta) else float(delay)
             logger.warning("Rate limited (%s); sleeping %.1fs (attempt %d)", what, wait, attempt)
             await asyncio.sleep(wait)
+        except BadRequest:
+            # PTB quirk: BadRequest subclasses NetworkError, but a 400 is not
+            # transient — retrying it just repeats the same rejection. Let the
+            # caller translate it ("not found", "not modified", ...).
+            raise
         except (TimedOut, NetworkError) as exc:
             attempt += 1
             if attempt > max_retries:
@@ -234,7 +239,7 @@ async def connect_mtproto(settings: Settings) -> TelegramClient:
         raise TupError(
             "Uploads require MTProto credentials (TELEGRAM_API_ID / TELEGRAM_API_HASH).",
             hint="Create them in seconds at https://my.telegram.org → API development "
-            "tools, then run [bold]tup setup[/bold] or add them to ~/.tui/.env.",
+            "tools, then run [bold]tup setup[/bold] or add them to ~/.tup/.env.",
         )
     session_path = config_dir() / "tup-mtproto"
     client = TelegramClient(

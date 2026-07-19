@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from tup.uploader import DuplicateFileError
+from tup.utils import is_hidden_within
 
 TransferKind = Literal["upload", "download"]
 TransferState = Literal["queued", "running", "done", "failed", "cancelled", "skipped"]
@@ -194,6 +195,8 @@ def collect_upload_targets(paths: list[Path], base_dir: str) -> list[tuple[Path,
             out.append((path, base, path.stat().st_size))
         elif path.is_dir():
             for file in sorted(p for p in path.rglob("*") if p.is_file()):
+                if is_hidden_within(file, path):
+                    continue  # dotfiles/.git/.DS_Store never become drive content
                 rel = file.parent.relative_to(path)
                 sub = base + path.name + "/"
                 if str(rel) != ".":

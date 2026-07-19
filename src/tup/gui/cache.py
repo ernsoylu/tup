@@ -1,7 +1,7 @@
 """Local download cache mirroring each drive's folder structure.
 
 Layout: `<cache root>/<chat_id>/<virtual folders...>/<file>` — the same tree
-the drive has on Telegram, rooted in tup's `~/.tui` home next to the .env
+the drive has on Telegram, rooted in tup's `~/.tup` home next to the .env
 and registry.db (override with the TUP_CACHE_DIR environment variable).
 """
 

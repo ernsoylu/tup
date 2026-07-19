@@ -419,7 +419,16 @@ class MainWindow(QMainWindow):
         folders = sum(1 for r in rows if r.is_dir)
         files = len(rows) - folders
         total = sum(r.size for r in rows if not r.is_dir)
-        self._status(f"{folders} folder(s), {files} file(s), {human_size(total)}")
+        hidden = 0
+        if not self.show_hidden:
+            hidden = len(build_rows(self.entries, path, show_hidden=True)) - len(rows)
+        hidden_note = f" (+{hidden} hidden — toggle 'Show hidden')" if hidden else ""
+        drive = self.drive_combo.currentText() or "no drive"
+        self.setWindowTitle(f"tup — {drive}")
+        self._status(
+            f"{drive} · {path} — {folders} folder(s), {files} file(s), "
+            f"{human_size(total)}{hidden_note}"
+        )
         self._select_tree_path(path)
 
     def _select_tree_path(self, path: str) -> None:
