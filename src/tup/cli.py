@@ -2,19 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import Annotated
+from collections.abc import Coroutine
+from pathlib import Path
+from typing import Annotated, Any
 
 import typer
 from rich.logging import RichHandler
+from rich.panel import Panel
+from rich.table import Table
+from telegram.error import BadRequest, Forbidden
 from typer._click import Command, Context
 from typer._click.exceptions import UsageError
 from typer.core import TyperGroup
 
 from tup import __version__
-from tup.config import log_file_path
-from tup.progress import error_console
-from tup.utils import SecretScrubberFormatter
+from tup.config import Settings, SetupRequiredError, log_file_path
+from tup.database import Database, DatabaseError
+from tup.progress import console, error_console
+from tup.uploader import TupError, access_error, bot_session, upload_file
+from tup.utils import SecretScrubberFormatter, VfsPathError, normalize_vfs_path
 
 state: dict[str, bool] = {"debug": False}
 
@@ -36,6 +44,33 @@ def setup_logging(level: str = "INFO") -> None:
     root.addHandler(file_handler)
 
 
+def fail(message: str, hint: str | None = None) -> None:
+    body = f"❌ Error: {message}"
+    if hint:
+        body += f"\n💡 {hint}"
+    error_console.print(Panel(body, border_style="red", expand=False))
+
+
+def run_async[T](coro: Coroutine[Any, Any, T]) -> T:
+    """Async execution bridge and the single user-facing error boundary.
+
+    Domain errors render as rich panels; raw tracebacks only with --debug.
+    """
+    try:
+        return asyncio.run(coro)
+    except (TupError, SetupRequiredError) as exc:
+        fail(str(exc), getattr(exc, "hint", None))
+        raise typer.Exit(code=1) from exc
+    except (DatabaseError, VfsPathError) as exc:
+        fail(str(exc))
+        raise typer.Exit(code=1) from exc
+    except Exception as exc:
+        if state["debug"]:
+            raise
+        fail(f"Unexpected error: {exc}", hint="Re-run with --debug for the full traceback.")
+        raise typer.Exit(code=1) from exc
+
+
 class DefaultToUpGroup(TyperGroup):
     """Click group that routes unknown command tokens to the `up` command.
 
@@ -49,10 +84,10 @@ class DefaultToUpGroup(TyperGroup):
         try:
             return super().resolve_command(ctx, args)
         except UsageError:
-            up = self.get_command(ctx, "up")
-            if up is None:  # pragma: no cover - `up` is always registered
+            up_cmd = self.get_command(ctx, "up")
+            if up_cmd is None:  # pragma: no cover - `up` is always registered
                 raise
-            return "up", up, args
+            return "up", up_cmd, args
 
 
 app = typer.Typer(
@@ -62,6 +97,9 @@ app = typer.Typer(
     no_args_is_help=True,
     rich_markup_mode="rich",
 )
+
+chat_app = typer.Typer(help="Manage drive aliases for Telegram chats.", no_args_is_help=True)
+app.add_typer(chat_app, name="chat")
 
 
 def _version_callback(value: bool) -> None:
@@ -82,16 +120,170 @@ def main(
     setup_logging("DEBUG" if debug else "INFO")
 
 
+# --- setup --------------------------------------------------------------------
+
+
+@app.command("setup")
+def setup_cmd() -> None:
+    """Interactive first-run configuration wizard."""
+    from tup.setup import run_wizard
+
+    try:
+        run_wizard()
+    except TupError as exc:
+        fail(str(exc), exc.hint)
+        raise typer.Exit(code=1) from exc
+
+
+# --- chat alias management ----------------------------------------------------
+
+
+async def _resolve_drive_or_fail(db: Database, drive: str | None, settings: Settings) -> str:
+    target = drive or settings.default_chat_id
+    if not target:
+        raise TupError(
+            "No target drive given and no default configured.",
+            hint="Pass [bold]--to <drive>[/bold] or set DEFAULT_CHAT_ID via tup setup.",
+        )
+    return await db.resolve_drive(target)
+
+
+# Numeric chat IDs like "-100123" look like options to click; ignore_unknown_options
+# lets them flow through to positional arguments.
+NEGATIVE_ID_OK = {"ignore_unknown_options": True}
+
+
+@chat_app.command("add", context_settings=NEGATIVE_ID_OK)
+def chat_add(
+    alias: Annotated[str, typer.Argument(help="Short name for the drive.")],
+    chat_id: Annotated[str, typer.Argument(help="Numeric Telegram chat ID.")],
+) -> None:
+    """Validate a chat, fetch its title, and save the alias."""
+
+    async def _run() -> None:
+        settings = Settings.load()
+        async with Database(settings.database_path) as db:
+            async with bot_session(settings) as bot:
+                try:
+                    chat = await bot.get_chat(chat_id)
+                except (Forbidden, BadRequest) as exc:
+                    raise access_error(chat_id) from exc
+            title = chat.title or chat.full_name or None
+            await db.alias_add(alias, chat_id, title)
+            console.print(f"✅ Drive [bold]{alias}[/bold] → {chat_id} ({title or 'untitled'})")
+
+    run_async(_run())
+
+
+@chat_app.command("list")
+def chat_list() -> None:
+    """List registered drive aliases."""
+
+    async def _run() -> None:
+        settings = Settings.load()
+        async with Database(settings.database_path) as db:
+            aliases = await db.alias_list()
+        table = Table("Alias", "Chat ID", "Title", "Added")
+        for entry in aliases:
+            table.add_row(entry.alias, entry.chat_id, entry.title or "-", entry.created_at)
+        console.print(table)
+
+    run_async(_run())
+
+
+@chat_app.command("remove")
+def chat_remove(alias: Annotated[str, typer.Argument(help="Alias to delete.")]) -> None:
+    """Remove a drive alias (does not touch the chat itself)."""
+
+    async def _run() -> None:
+        settings = Settings.load()
+        async with Database(settings.database_path) as db:
+            removed = await db.alias_remove(alias)
+        if removed:
+            console.print(f"✅ Removed alias [bold]{alias}[/bold]")
+        else:
+            raise TupError(f"No such alias: {alias!r}")
+
+    run_async(_run())
+
+
+# --- upload -------------------------------------------------------------------
+
+
+def _resolve_local(path: str) -> Path:
+    local = Path(path).expanduser()
+    if not local.exists():
+        raise TupError(f"No such file or directory: {path}")
+    return local
+
+
+def _collect_targets(local: Path, dest: str) -> list[tuple[Path, str]]:
+    """Map a file or directory to (local_file, vfs_dest_dir) upload pairs."""
+    if local.is_file():
+        return [(local, dest)]
+    # A local folder mounts under its own name: /code -> /code/ (spec §5)
+    mount = normalize_vfs_path(dest, directory=True) + local.name
+    targets = []
+    for file_path in sorted(local.rglob("*")):
+        if not file_path.is_file():
+            continue
+        rel = file_path.parent.relative_to(local).as_posix()
+        targets.append((file_path, mount if rel == "." else f"{mount}/{rel}"))
+    if not targets:
+        raise TupError(f"Directory is empty: {local}")
+    return targets
+
+
 @app.command()
 def up(
     path: Annotated[str, typer.Argument(help="Local file or directory to upload.")],
     to: Annotated[str | None, typer.Option("--to", help="Target drive (alias or chat_id).")] = None,
     dest: Annotated[str, typer.Option("--dest", help="Destination VFS path.")] = "/",
+    caption: Annotated[
+        str | None, typer.Option("--caption", help="Optional user caption text.")
+    ] = None,
     as_doc: Annotated[bool, typer.Option("--as-doc", help="Force send_document.")] = False,
     as_video: Annotated[bool, typer.Option("--as-video", help="Force send_video.")] = False,
     as_audio: Annotated[bool, typer.Option("--as-audio", help="Force send_audio.")] = False,
     silent: Annotated[bool, typer.Option("--silent", help="Disable notification sound.")] = False,
 ) -> None:
     """Upload a local file or directory to a Telegram drive."""
-    typer.echo(f"upload placeholder: {path}")
-    raise typer.Exit(code=0)
+
+    async def _run() -> None:
+        settings = Settings.load()
+        local = _resolve_local(path)
+        targets = _collect_targets(local, dest)
+        async with Database(settings.database_path) as db:
+            chat_id = await _resolve_drive_or_fail(db, to, settings)
+            async with bot_session(settings) as bot:
+                failures = 0
+                for file_path, dest_dir in targets:
+                    try:
+                        message = await upload_file(
+                            db,
+                            settings,
+                            bot,
+                            file_path,
+                            chat_id,
+                            dest_dir,
+                            as_doc=as_doc,
+                            as_video=as_video,
+                            as_audio=as_audio,
+                            silent=silent,
+                            user_caption=caption,
+                        )
+                        console.print(
+                            f"✅ {file_path.name} → drive {chat_id} (message {message.message_id})"
+                        )
+                    except TupError as exc:
+                        if len(targets) == 1:
+                            raise
+                        failures += 1
+                        fail(f"{file_path}: {exc}", exc.hint)
+                if failures:
+                    raise TupError(
+                        f"{failures}/{len(targets)} uploads failed.",
+                        hint="See [bold]tup failed[/bold] and re-run with [bold]tup retry[/bold].",
+                    )
+
+    run_async(_run())

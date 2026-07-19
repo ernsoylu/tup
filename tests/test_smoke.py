@@ -27,9 +27,15 @@ def test_up_help() -> None:
 
 
 def test_unknown_token_falls_back_to_up() -> None:
+    # Routed to `up`, which fails at the settings gate (no config in tests) —
+    # a click usage error (exit 2) would mean the fallback did not fire.
     result = runner.invoke(app, ["somefile.pdf"])
-    assert result.exit_code == 0
-    assert "somefile.pdf" in result.output
+    assert result.exit_code == 1
+    try:
+        combined = result.output + result.stderr
+    except ValueError:
+        combined = result.output
+    assert "setup" in combined
 
 
 def test_known_command_wins_over_fallback() -> None:
