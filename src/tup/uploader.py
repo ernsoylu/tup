@@ -216,9 +216,12 @@ def media_info(message: Message) -> tuple[str, int] | None:
 # --- MTProto (Telethon): the upload transport ---------------------------------
 
 
-@asynccontextmanager
-async def mtproto_session(settings: Settings) -> AsyncIterator[TelegramClient]:
-    """Connected Telethon client logged in with the bot token (no phone login)."""
+async def connect_mtproto(settings: Settings) -> TelegramClient:
+    """Connected Telethon client logged in with the bot token (no phone login).
+
+    The caller owns the client and must eventually `disconnect()` it; use
+    `mtproto_session` for scoped one-shot use.
+    """
     if not (settings.telegram_api_id and settings.telegram_api_hash):
         raise TupError(
             "Uploads require MTProto credentials (TELEGRAM_API_ID / TELEGRAM_API_HASH).",
@@ -233,6 +236,13 @@ async def mtproto_session(settings: Settings) -> AsyncIterator[TelegramClient]:
     )
     await client.start(bot_token=settings.telegram_bot_token.get_secret_value())
     _secure_session_file(session_path)
+    return client
+
+
+@asynccontextmanager
+async def mtproto_session(settings: Settings) -> AsyncIterator[TelegramClient]:
+    """Scoped MTProto client: connects on entry, disconnects on exit."""
+    client = await connect_mtproto(settings)
     try:
         yield client
     finally:
@@ -374,12 +384,15 @@ async def upload_file(
     as_audio: bool = False,
     silent: bool = False,
     user_caption: str | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> int:
     """Upload one file over MTProto: preflight, caption, send, then index + log.
 
     Returns the Telegram message_id (chat-scoped, shared with the Bot API, so
     mv/rm interoperate). Terminal failures are recorded in failed_registry and
-    uploads_log before the TupError propagates (spec §8).
+    uploads_log before the TupError propagates (spec §8). When
+    `progress_callback` is given (e.g. by the GUI transfer queue) it replaces
+    the rich terminal progress bar.
     """
     size = _stat_upload_size(local_path)
     check_size_limit(local_path, size)
@@ -394,12 +407,8 @@ async def upload_file(
 
     async def _send() -> int:
         peer = await resolve_peer(client, chat_id)
-        with make_progress(transient=True) as progress:
-            task_id = progress.add_task(local_path.name, total=size)
 
-            def on_progress(sent: int, _total: int) -> None:
-                progress.update(task_id, completed=sent)
-
+        async def _do(callback: Callable[[int, int], None]) -> int:
             message = await client.send_file(
                 peer,
                 str(local_path),
@@ -409,9 +418,19 @@ async def upload_file(
                 supports_streaming=(kind == "video"),
                 attributes=attributes,  # real w/h/duration so Telegram renders correctly
                 silent=silent,
-                progress_callback=on_progress,
+                progress_callback=callback,
             )
-        return int(message.id)
+            return int(message.id)
+
+        if progress_callback is not None:
+            return await _do(progress_callback)
+        with make_progress(transient=True) as progress:
+            task_id = progress.add_task(local_path.name, total=size)
+
+            def on_progress(sent: int, _total: int) -> None:
+                progress.update(task_id, completed=sent)
+
+            return await _do(on_progress)
 
     try:
         message_id = await _mtproto_with_retry(

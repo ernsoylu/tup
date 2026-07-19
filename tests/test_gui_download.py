@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -93,11 +91,10 @@ def test_double_click_downloads_and_marks_row(
 
     fake = FakeMtprotoClient()
 
-    @asynccontextmanager
-    async def fake_session(settings: Any) -> AsyncIterator[FakeMtprotoClient]:
-        yield fake
+    async def fake_connect(settings: Any) -> FakeMtprotoClient:
+        return fake
 
-    monkeypatch.setattr("tup.gui.main_window.mtproto_session", fake_session)
+    monkeypatch.setattr("tup.gui.bridge.connect_mtproto", fake_connect)
 
     bridge = CoreBridge(Settings.load())
     bridge.start()

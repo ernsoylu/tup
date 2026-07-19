@@ -163,6 +163,9 @@ class FakeMtprotoClient:
     async def get_input_entity(self, peer: Any) -> Any:
         return peer
 
+    async def disconnect(self) -> None:
+        return None
+
     async def send_file(self, peer: Any, file: Any, **kwargs: Any) -> Any:
         self.sent.append({"peer": peer, "file": file, **kwargs})
         message = SimpleNamespace(id=self.next_id)

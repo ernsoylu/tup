@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from PyQt6.QtCore import QModelIndex, QPoint, QSize, Qt, QUrl
@@ -12,6 +14,9 @@ from PyQt6.QtGui import (
     QActionGroup,
     QCloseEvent,
     QDesktopServices,
+    QDragEnterEvent,
+    QDragMoveEvent,
+    QDropEvent,
     QIcon,
     QStandardItem,
     QStandardItemModel,
@@ -19,6 +24,8 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
+    QDockWidget,
+    QFileDialog,
     QHeaderView,
     QLineEdit,
     QListView,
@@ -45,10 +52,80 @@ from tup.gui.models import (
     build_rows,
     human_size,
 )
-from tup.uploader import download_media_file, mtproto_session
+from tup.gui.transfers import Transfer, TransferManager, collect_upload_targets
+from tup.gui.transfers_panel import TransfersPanel
+from tup.uploader import download_media_file, upload_file
 from tup.utils import VfsPathError, normalize_vfs_path
 
 PATH_ROLE = Qt.ItemDataRole.UserRole + 1
+
+DropHandler = Callable[[list[Path]], None]
+
+
+def _accept_file_drag(event: QDragEnterEvent | QDragMoveEvent | None) -> None:
+    if event is None:
+        return
+    mime = event.mimeData()
+    if mime is not None and mime.hasUrls():
+        event.acceptProposedAction()
+
+
+def _paths_from_drop(event: QDropEvent | None) -> list[Path]:
+    if event is None:
+        return []
+    mime = event.mimeData()
+    if mime is None or not mime.hasUrls():
+        return []
+    event.acceptProposedAction()
+    return [Path(url.toLocalFile()) for url in mime.urls() if url.isLocalFile()]
+
+
+class _DropTableView(QTableView):
+    """Details view accepting OS file drops (files and folders)."""
+
+    def __init__(self, drop_handler: DropHandler) -> None:
+        super().__init__()
+        self._drop_handler = drop_handler
+        self.setAcceptDrops(True)
+        viewport = self.viewport()
+        if viewport is not None:
+            viewport.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+
+    def dragEnterEvent(self, e: QDragEnterEvent | None) -> None:
+        _accept_file_drag(e)
+
+    def dragMoveEvent(self, e: QDragMoveEvent | None) -> None:
+        _accept_file_drag(e)
+
+    def dropEvent(self, e: QDropEvent | None) -> None:
+        paths = _paths_from_drop(e)
+        if paths:
+            self._drop_handler(paths)
+
+
+class _DropListView(QListView):
+    """Icon view accepting OS file drops (files and folders)."""
+
+    def __init__(self, drop_handler: DropHandler) -> None:
+        super().__init__()
+        self._drop_handler = drop_handler
+        self.setAcceptDrops(True)
+        viewport = self.viewport()
+        if viewport is not None:
+            viewport.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+
+    def dragEnterEvent(self, e: QDragEnterEvent | None) -> None:
+        _accept_file_drag(e)
+
+    def dragMoveEvent(self, e: QDragMoveEvent | None) -> None:
+        _accept_file_drag(e)
+
+    def dropEvent(self, e: QDropEvent | None) -> None:
+        paths = _paths_from_drop(e)
+        if paths:
+            self._drop_handler(paths)
 
 
 def _plain(text: str) -> str:
@@ -78,15 +155,27 @@ class MainWindow(QMainWindow):
             self._folder_icon = QIcon()
             self._file_icon = QIcon()
 
+        self._pending_opens: dict[int, Path] = {}
+        self.transfers = TransferManager(self._on_transfer_update_from_loop)
+
         self._build_body()
         self._build_toolbar()
+        self._build_transfers_dock()
         self._status("Loading drives…")
+        self.bridge.submit(self._start_transfers())
         self._reload_drives()
+
+    async def _start_transfers(self) -> None:
+        # create_task needs a running loop, so the worker starts on the bridge.
+        self.transfers.start()
 
     # -- UI construction -------------------------------------------------------
 
     def _build_body(self) -> None:
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
+
+        self.table_view = _DropTableView(self.enqueue_upload_paths)
+        self.icon_view = _DropListView(self.enqueue_upload_paths)
 
         self.tree_view = QTreeView()
         self.tree_model = QStandardItemModel(self)
@@ -101,7 +190,6 @@ class MainWindow(QMainWindow):
         self.file_model = FileTableModel(self._folder_icon, self._file_icon, self)
         self.file_proxy = FileSortProxy(self.file_model, self)
 
-        self.table_view = QTableView()
         self.table_view.setModel(self.file_proxy)
         self.table_view.setSortingEnabled(True)
         self.table_view.sortByColumn(0, Qt.SortOrder.AscendingOrder)
@@ -120,7 +208,6 @@ class MainWindow(QMainWindow):
         self.table_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table_view.customContextMenuRequested.connect(self._on_context_menu)
 
-        self.icon_view = QListView()
         self.icon_view.setModel(self.file_proxy)
         self.icon_view.setViewMode(QListView.ViewMode.IconMode)
         self.icon_view.setIconSize(QSize(48, 48))
@@ -166,6 +253,14 @@ class MainWindow(QMainWindow):
         self.refresh_action.triggered.connect(lambda: self.refresh())
         toolbar.addAction(self.refresh_action)
 
+        self.upload_files_action = QAction("⇪ Upload files…", self)
+        self.upload_files_action.triggered.connect(self._pick_upload_files)
+        toolbar.addAction(self.upload_files_action)
+
+        self.upload_folder_action = QAction("⇪ Upload folder…", self)
+        self.upload_folder_action.triggered.connect(self._pick_upload_folder)
+        toolbar.addAction(self.upload_folder_action)
+
         view_group = QActionGroup(self)
         self.details_action = QAction("Details", self)
         self.details_action.setCheckable(True)
@@ -183,6 +278,25 @@ class MainWindow(QMainWindow):
         self.hidden_action.setCheckable(True)
         self.hidden_action.toggled.connect(self._on_hidden_toggled)
         toolbar.addAction(self.hidden_action)
+
+        self.transfers_action = QAction("Transfers", self)
+        self.transfers_action.triggered.connect(
+            lambda: self.transfers_dock.setVisible(not self.transfers_dock.isVisible())
+        )
+        toolbar.addAction(self.transfers_action)
+
+    def _build_transfers_dock(self) -> None:
+        self.transfers_panel = TransfersPanel(
+            on_pause=lambda: self.bridge.submit(self.transfers.pause()),
+            on_resume=lambda: self.bridge.submit(self.transfers.resume()),
+            on_skip=lambda: self.bridge.submit(self.transfers.skip_current()),
+            on_cancel=lambda tid: self.bridge.submit(self.transfers.cancel(tid)),
+            parent=self,
+        )
+        self.transfers_dock = QDockWidget("Transfers", self)
+        self.transfers_dock.setWidget(self.transfers_panel)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.transfers_dock)
+        self.transfers_dock.hide()
 
     # -- drives ----------------------------------------------------------------
 
@@ -320,7 +434,7 @@ class MainWindow(QMainWindow):
         self.download_row(row, open_after=True)
 
     def download_row(self, row: FileRow, *, open_after: bool = False) -> None:
-        """Fetch the file into the local cache; optionally open it when ready."""
+        """Queue the file into the local cache; optionally open it when ready."""
         entry = row.entry
         if entry is None:
             return
@@ -330,26 +444,98 @@ class MainWindow(QMainWindow):
             else:
                 self._status(f"{entry.file_name} is already downloaded.")
             return
-        self._status(f"Downloading {entry.file_name}…")
+        self.transfers_dock.show()
+        self.bridge.submit(
+            self._enqueue_download(entry, open_after=open_after), on_error=self._show_error
+        )
 
-        def _done(path: Path) -> None:
-            self.set_current_dir(self.current_dir)  # refresh Downloaded badges
-            self._status(f"Downloaded {path.name}")
-            if open_after:
-                self._open_local(path)
-
-        self.bridge.submit(self._download_entry(entry), _done, self._show_error)
-
-    async def _download_entry(self, entry: VfsEntry) -> Path:
+    async def _enqueue_download(self, entry: VfsEntry, *, open_after: bool) -> None:
         dest = cached_path(entry)
-        async with mtproto_session(self.bridge.settings) as client:
-            return await download_media_file(
+
+        async def runner(transfer: Transfer) -> None:
+            client = await self.bridge.mtproto()
+            await download_media_file(
                 client,
                 entry.chat_id,
                 entry.telegram_message_id,
                 dest,
                 max_retries=self.bridge.settings.max_retries,
+                progress=lambda got, total: self.transfers.report(transfer, got, total),
             )
+
+        transfer = await self.transfers.enqueue(
+            "download", entry.file_name, f"← {entry.virtual_path}", entry.file_size, runner
+        )
+        if open_after:
+            self._pending_opens[transfer.id] = dest
+
+    # -- uploads ----------------------------------------------------------------
+
+    def enqueue_upload_paths(self, paths: list[Path]) -> None:
+        """Upload dropped/picked files and folders into the current directory."""
+        chat_id = self._current_chat_id()
+        if chat_id is None:
+            self._status("Add a drive before uploading.")
+            return
+        targets = collect_upload_targets(paths, self.current_dir)
+        if not targets:
+            self._status("Nothing to upload.")
+            return
+        self.transfers_dock.show()
+        self.bridge.submit(self._enqueue_uploads(chat_id, targets), on_error=self._show_error)
+
+    async def _enqueue_uploads(self, chat_id: str, targets: list[tuple[Path, str, int]]) -> None:
+        for path, dest, size in targets:
+
+            async def runner(transfer: Transfer, path: Path = path, dest: str = dest) -> None:
+                client = await self.bridge.mtproto()
+
+                def on_progress(sent: int, total: int, t: Transfer = transfer) -> None:
+                    self.transfers.report(t, sent, total)
+
+                await upload_file(
+                    self.bridge.db,
+                    self.bridge.settings,
+                    client,
+                    path,
+                    chat_id,
+                    dest,
+                    progress_callback=on_progress,
+                )
+
+            await self.transfers.enqueue("upload", path.name, f"→ {dest}", size, runner)
+
+    def _pick_upload_files(self) -> None:
+        files, _filter = QFileDialog.getOpenFileNames(self, "Upload files", str(Path.home()))
+        if files:
+            self.enqueue_upload_paths([Path(f) for f in files])
+
+    def _pick_upload_folder(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "Upload folder", str(Path.home()))
+        if folder:
+            self.enqueue_upload_paths([Path(folder)])
+
+    # -- transfer updates --------------------------------------------------------
+
+    def _on_transfer_update_from_loop(self, snapshot: Transfer) -> None:
+        # Called on the bridge loop; hop onto the GUI thread before touching Qt.
+        self.bridge.call_in_gui(lambda: self._on_transfer_update(snapshot))
+
+    def _on_transfer_update(self, transfer: Transfer) -> None:
+        self.transfers_panel.update_transfer(transfer)
+        if transfer.state == "done":
+            if transfer.kind == "upload":
+                self.refresh()
+            else:
+                self.set_current_dir(self.current_dir)  # refresh Downloaded badges
+                pending = self._pending_opens.pop(transfer.id, None)
+                if pending is not None:
+                    self._open_local(pending)
+        elif transfer.state == "failed":
+            self._pending_opens.pop(transfer.id, None)
+            self._status(f"{transfer.label}: {transfer.error}")
+        elif transfer.state in ("cancelled", "skipped"):
+            self._pending_opens.pop(transfer.id, None)
 
     def _open_local(self, path: Path) -> None:
         if self.open_files_externally:
@@ -418,5 +604,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "tup — error", _plain(text))
 
     def closeEvent(self, a0: QCloseEvent | None) -> None:
+        with contextlib.suppress(Exception):  # bridge may already be stopped
+            self.bridge.submit(self.transfers.shutdown()).result(timeout=5)
         self.bridge.stop()
         super().closeEvent(a0)

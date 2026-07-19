@@ -15,9 +15,11 @@ from concurrent.futures import Future
 from typing import Any
 
 from PyQt6.QtCore import QObject, pyqtSignal
+from telethon import TelegramClient
 
 from tup.config import Settings
 from tup.database import Database
+from tup.uploader import connect_mtproto
 
 
 class CoreBridge(QObject):
@@ -31,6 +33,7 @@ class CoreBridge(QObject):
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, name="tup-core", daemon=True)
         self._db: Database | None = None
+        self._mtproto: TelegramClient | None = None
         self._dispatch.connect(self._run_job)
 
     # -- lifecycle -------------------------------------------------------------
@@ -56,6 +59,9 @@ class CoreBridge(QObject):
         await self._db.connect()
 
     async def _close_db(self) -> None:
+        if self._mtproto is not None:
+            await self._mtproto.disconnect()
+            self._mtproto = None
         if self._db is not None:
             await self._db.close()
             self._db = None
@@ -65,6 +71,16 @@ class CoreBridge(QObject):
         if self._db is None:
             raise RuntimeError("CoreBridge is not started")
         return self._db
+
+    async def mtproto(self) -> TelegramClient:
+        """Lazily connected, long-lived MTProto client (bridge loop only)."""
+        if self._mtproto is None:
+            self._mtproto = await connect_mtproto(self.settings)
+        return self._mtproto
+
+    def call_in_gui(self, job: Callable[[], None]) -> None:
+        """Run `job` on the GUI thread (safe to call from the worker loop)."""
+        self._dispatch.emit(job)
 
     # -- scheduling ------------------------------------------------------------
 
