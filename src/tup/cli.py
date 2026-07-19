@@ -860,3 +860,49 @@ def logs(
         console.print(table)
 
     run_async(_run())
+
+
+@chat_app.command("discover")
+def chat_discover() -> None:
+    """Show chats the bot can currently see, with their IDs.
+
+    The Bot API cannot enumerate a bot's chats; discovery works by peeking at
+    pending updates (non-destructively). Add the bot to a group/channel and
+    send any message there, then run this command and `tup chat add`.
+    """
+
+    async def _run() -> None:
+        settings = Settings.load()
+        chats: dict[int, tuple[str, str]] = {}
+        async with bot_session(settings) as bot:
+            # No offset: peeking does not consume updates, so `tup index`
+            # still sees them later.
+            updates = await bot.get_updates(
+                timeout=0,
+                allowed_updates=[
+                    "message",
+                    "edited_message",
+                    "channel_post",
+                    "edited_channel_post",
+                    "my_chat_member",
+                ],
+            )
+        for update in updates:
+            chat = update.effective_chat
+            if chat is None:
+                continue
+            title = chat.title or chat.full_name or chat.username or "-"
+            chats[chat.id] = (chat.type, title)
+        if not chats:
+            console.print(
+                "No chats visible yet. Add the bot to a group/channel (admin for "
+                "channels), send any message there, and re-run [bold]tup chat discover[/bold]."
+            )
+            return
+        table = Table("Chat ID", "Type", "Title")
+        for chat_id, (chat_type, title) in sorted(chats.items()):
+            table.add_row(str(chat_id), chat_type, title)
+        console.print(table)
+        console.print("Register one with [bold]tup chat add <alias> <chat_id>[/bold]")
+
+    run_async(_run())
