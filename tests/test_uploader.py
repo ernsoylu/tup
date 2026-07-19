@@ -5,21 +5,20 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
-import respx
 from telegram.error import RetryAfter, TimedOut
 
-import tup.uploader as uploader_module
-from tests.conftest import CHAT_ID, make_settings
+from tests.conftest import CHAT_ID, FakeMtprotoClient, make_settings
 from tup.config import Settings
 from tup.database import Database
 from tup.uploader import (
     TupError,
-    bot_session,
-    decide_transport,
+    check_size_limit,
+    copy_message_media,
     format_caption,
     parse_caption,
     resolve_kind,
@@ -84,7 +83,7 @@ def test_parse_caption_ignores_foreign_messages() -> None:
     assert parse_caption("📁 `/x` but no hash") is None
 
 
-# --- retry logic --------------------------------------------------------------
+# --- Bot API retry logic (used by metadata operations) ------------------------
 
 
 async def test_retry_after_sleeps_then_succeeds(no_sleep: list[float]) -> None:
@@ -128,29 +127,13 @@ async def test_exhausted_retries_raise_tup_error(no_sleep: list[float]) -> None:
 # --- preflight & routing ------------------------------------------------------
 
 
-BIG = 51 * 1024 * 1024
+def test_size_gate_blocks_over_2gb(tmp_path: Path) -> None:
+    with pytest.raises(TupError, match="2 GB"):
+        check_size_limit(tmp_path / "huge.bin", 3 * 1024**3)
 
 
-def test_size_gate_blocks_over_50mb_without_alternatives(
-    settings: Settings, tmp_path: Path
-) -> None:
-    f = tmp_path / "big.bin"
-    with pytest.raises(TupError, match="50 MB"):
-        decide_transport(f, BIG, settings)
-
-
-def test_small_files_use_bot_api(settings: Settings, tmp_path: Path) -> None:
-    assert decide_transport(tmp_path / "small.bin", 1024, settings) == "botapi"
-
-
-def test_local_api_server_keeps_bot_api_for_big_files(tmp_path: Path) -> None:
-    settings = make_settings(base_url="http://localhost:8081")
-    assert decide_transport(tmp_path / "big.bin", BIG, settings) == "botapi"
-
-
-def test_mtproto_chosen_for_big_files_with_api_credentials(tmp_path: Path) -> None:
-    settings = make_settings(api_id=12345, api_hash="f" * 32)
-    assert decide_transport(tmp_path / "big.bin", BIG, settings) == "mtproto"
+def test_size_gate_allows_large_files(tmp_path: Path) -> None:
+    check_size_limit(tmp_path / "big.bin", 1024**3)  # 1 GB: fine over MTProto
 
 
 def test_resolve_kind_override_flags(tmp_path: Path) -> None:
@@ -161,60 +144,85 @@ def test_resolve_kind_override_flags(tmp_path: Path) -> None:
     assert resolve_kind(f, as_audio=True)[1] == "audio"
 
 
-# --- upload_file --------------------------------------------------------------
+# --- upload_file (MTProto transport) ------------------------------------------
 
 
 async def test_upload_file_success_indexes_and_logs(
-    settings: Settings, db: Database, telegram_api: respx.MockRouter, tmp_path: Path
+    settings: Settings, db: Database, tmp_path: Path
 ) -> None:
+    client = FakeMtprotoClient()
     f = tmp_path / "notes.txt"
     f.write_bytes(b"hello world")
-    async with bot_session(settings) as bot:
-        message_id = await upload_file(db, settings, bot, f, CHAT_ID, "/docs")
+
+    message_id = await upload_file(db, settings, client, f, CHAT_ID, "/docs")
+
     assert message_id == 101
+    sent = client.sent[0]
+    assert sent["force_document"] is True  # text routes as document
+    assert "📁 `/docs/notes.txt`" in sent["caption"]
+    assert sent["parse_mode"] is None  # caption protocol stays raw
     entry = await db.vfs_get(CHAT_ID, "/docs/", "notes.txt")
     assert entry is not None
     assert entry.file_hash == HASH
-    assert entry.telegram_file_id == "fid-doc"
+    assert entry.telegram_file_id == ""  # MTProto yields no Bot API file_id
     logs = await db.log_recent()
     assert logs[0].status == "success"
     assert logs[0].telegram_message_id == 101
 
 
-async def test_upload_file_routes_large_files_via_mtproto(
-    db: Database, mock_bot: AsyncMock, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+async def test_upload_routes_video_as_streaming_media(
+    settings: Settings, db: Database, tmp_path: Path
 ) -> None:
-    settings = make_settings(api_id=12345, api_hash="f" * 32)
+    client = FakeMtprotoClient()
     f = tmp_path / "movie.mp4"
-    f.write_bytes(b"\x00" * 128)
-    monkeypatch.setattr(uploader_module, "BOT_API_LIMIT_BYTES", 64)  # force the large path
-    fake_mtproto = AsyncMock(return_value=777)
-    monkeypatch.setattr(uploader_module, "upload_via_mtproto", fake_mtproto)
+    f.write_bytes(b"\x00" * 64)
 
-    message_id = await upload_file(db, settings, mock_bot, f, CHAT_ID, "/videos")
+    await upload_file(db, settings, client, f, CHAT_ID, "/videos")
 
-    assert message_id == 777
-    fake_mtproto.assert_awaited_once()
-    mock_bot.send_video.assert_not_called()  # Bot API path skipped entirely
-    entry = await db.vfs_get(CHAT_ID, "/videos/", "movie.mp4")
-    assert entry is not None
-    assert entry.telegram_message_id == 777
-    assert entry.telegram_file_id == ""  # MTProto yields no Bot API file_id
-    logs = await db.log_recent()
-    assert logs[0].status == "success"
+    sent = client.sent[0]
+    assert sent["force_document"] is False  # browsable in the media gallery
+    assert sent["supports_streaming"] is True
 
 
 async def test_upload_failure_lands_in_failed_registry(
-    settings: Settings, db: Database, mock_bot: AsyncMock, no_sleep: list[float], tmp_path: Path
+    settings: Settings, db: Database, no_sleep: list[float], tmp_path: Path
 ) -> None:
+    client = AsyncMock()
+    client.get_input_entity = AsyncMock(return_value="peer")
+    client.send_file.side_effect = ConnectionError("boom")
     f = tmp_path / "notes.txt"
     f.write_bytes(b"hello world")
-    mock_bot.send_document.side_effect = TimedOut()
+
     with pytest.raises(TupError, match="network failure"):
-        await upload_file(db, settings, mock_bot, f, CHAT_ID, "/docs")
+        await upload_file(db, settings, client, f, CHAT_ID, "/docs")
+
     pending = await db.failed_pending()
     assert len(pending) == 1
     assert pending[0].file_path == str(f)
     assert pending[0].status == "pending"
     logs = await db.log_recent()
     assert logs[0].status == "failed"
+
+
+async def test_copy_message_media_reuses_media(settings: Settings) -> None:
+    client = FakeMtprotoClient()
+    new_id = await copy_message_media(
+        client,
+        CHAT_ID,
+        11,
+        format_caption("/archive/a.pdf", HASH),
+        max_retries=2,
+    )
+    assert new_id == 101
+    sent = client.sent[0]
+    assert sent["file"] == "media-of-11"  # existing media object, no re-upload
+
+
+class _NoMediaClient(FakeMtprotoClient):
+    async def get_messages(self, peer: Any, ids: int) -> Any:
+        return None
+
+
+async def test_copy_missing_media_raises(settings: Settings) -> None:
+    with pytest.raises(TupError, match="no media"):
+        await copy_message_media(_NoMediaClient(), CHAT_ID, 11, "cap", max_retries=2)

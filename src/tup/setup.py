@@ -58,11 +58,17 @@ def run_wizard() -> None:
         "Default chat type:", choices=["group", "user", "channel"], default="group"
     ).ask()
     api_id = questionary.text(
-        "my.telegram.org api_id (optional — enables >50MB uploads via MTProto):", default=""
+        "my.telegram.org api_id (required for uploads — get it at "
+        "https://my.telegram.org → API development tools):"
     ).ask()
-    api_hash = ""
-    if api_id and api_id.strip():
-        api_hash = questionary.password("my.telegram.org api_hash:").ask() or ""
+    if not api_id or not api_id.strip():
+        raise TupError(
+            "Setup cancelled: api_id is required.",
+            hint="Uploads run over MTProto, which needs my.telegram.org credentials.",
+        )
+    api_hash = questionary.password("my.telegram.org api_hash:").ask() or ""
+    if not api_hash.strip():
+        raise TupError("Setup cancelled: api_hash is required.")
 
     values = {
         "telegram_bot_token": token.strip(),

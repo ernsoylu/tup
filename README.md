@@ -47,8 +47,13 @@ tup logs --limit 50 --chat work
 
 ## Behavior notes
 
+- **One upload transport: MTProto.** All uploads and server-side copies go through
+  Telethon (MTProto) using your bot token plus `TELEGRAM_API_ID`/`TELEGRAM_API_HASH`
+  from https://my.telegram.org — uniform 2 GB cap, no local Bot API server, no Docker.
+  The Bot API is still used internally for metadata (chat validation, caption edits,
+  deletes, update draining).
 - **Media stays browsable.** Images, videos, and audio are detected by magic bytes and
-  sent via `send_photo` / `send_video` / `send_audio`, so they appear in Telegram's
+  sent as native media (videos with streaming support), so they appear in Telegram's
   media gallery. Use `--as-doc` to force original-quality document uploads
   (note: Telegram recompresses photos sent as photos).
 - **`tup <path>` fallback.** Unknown first tokens are routed to `tup up`. Known command
@@ -59,8 +64,6 @@ tup logs --limit 50 --chat work
   can only drain pending updates (`getUpdates`) — it applies native caption edits and,
   with `--reconstruct`, indexes tup-captioned messages it hasn't seen. It cannot scan
   arbitrary old history.
-- **50 MB limit.** Files over 50 MB require a local Bot API server
-  (`TELEGRAM_API_BASE_URL`) which raises the cap to 2 GB.
 
 ## Development
 

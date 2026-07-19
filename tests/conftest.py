@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -146,3 +148,36 @@ def telegram_api() -> Iterator[respx.MockRouter]:
 def mock_bot() -> AsyncMock:
     """AsyncMock standing in for telegram.Bot in pure unit tests."""
     return AsyncMock(spec=Bot)
+
+
+class FakeMtprotoClient:
+    """Stands in for a connected Telethon TelegramClient (MTProto never leaves the process)."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict[str, Any]] = []
+        self.next_id = 101
+
+    async def get_input_entity(self, peer: Any) -> Any:
+        return peer
+
+    async def send_file(self, peer: Any, file: Any, **kwargs: Any) -> Any:
+        self.sent.append({"peer": peer, "file": file, **kwargs})
+        message = SimpleNamespace(id=self.next_id)
+        self.next_id += 1
+        return message
+
+    async def get_messages(self, peer: Any, ids: int) -> Any:
+        return SimpleNamespace(id=ids, media=f"media-of-{ids}")
+
+
+@pytest.fixture
+def mock_mtproto(monkeypatch: pytest.MonkeyPatch) -> FakeMtprotoClient:
+    """Replace the CLI's mtproto_session with an in-memory fake client."""
+    fake = FakeMtprotoClient()
+
+    @asynccontextmanager
+    async def fake_session(settings: Any) -> AsyncIterator[FakeMtprotoClient]:
+        yield fake
+
+    monkeypatch.setattr("tup.cli.mtproto_session", fake_session)
+    return fake

@@ -9,7 +9,7 @@ import respx
 from typer.testing import CliRunner
 from typer.testing import Result as CliResult
 
-from tests.conftest import CHAT_ID
+from tests.conftest import CHAT_ID, FakeMtprotoClient
 from tup.cli import app
 from tup.config import default_database_path
 from tup.database import Database, VfsEntry
@@ -55,7 +55,12 @@ def test_chat_remove(fake_env: str, telegram_api: respx.MockRouter) -> None:
     assert runner.invoke(app, ["chat", "remove", "work"]).exit_code == 1
 
 
-def test_up_file_via_alias(fake_env: str, telegram_api: respx.MockRouter, tmp_path: Path) -> None:
+def test_up_file_via_alias(
+    fake_env: str,
+    telegram_api: respx.MockRouter,
+    mock_mtproto: FakeMtprotoClient,
+    tmp_path: Path,
+) -> None:
     runner.invoke(app, ["chat", "add", "work", CHAT_ID])
     f = tmp_path / "notes.txt"
     f.write_bytes(b"hello world")
@@ -67,7 +72,7 @@ def test_up_file_via_alias(fake_env: str, telegram_api: respx.MockRouter, tmp_pa
 
 
 def test_bare_path_fallback_uploads_to_default_drive(
-    fake_env: str, telegram_api: respx.MockRouter, tmp_path: Path
+    fake_env: str, mock_mtproto: FakeMtprotoClient, tmp_path: Path
 ) -> None:
     f = tmp_path / "photo.dat"
     f.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 300)
@@ -75,11 +80,12 @@ def test_bare_path_fallback_uploads_to_default_drive(
     assert result.exit_code == 0, all_output(result)
     entry = read_vfs(CHAT_ID, "/", "photo.dat")
     assert entry is not None
-    assert entry.telegram_file_id == "fid-photo"  # routed as photo by magic bytes
+    # magic bytes routed it as browsable media, not a forced document
+    assert mock_mtproto.sent[0]["force_document"] is False
 
 
 def test_up_directory_mounts_under_own_name(
-    fake_env: str, telegram_api: respx.MockRouter, tmp_path: Path
+    fake_env: str, mock_mtproto: FakeMtprotoClient, tmp_path: Path
 ) -> None:
     src = tmp_path / "code"
     (src / "sub").mkdir(parents=True)

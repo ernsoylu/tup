@@ -6,7 +6,8 @@
 Build `tup`, a resilient Python CLI that transforms Telegram chats, groups, and channels into S3-style cloud storage drives and POSIX-like Virtual Filesystems (VFS).
 - **Language**: Python 3.12+
 - **Package Manager**: `uv` (strictly via `pyproject.toml` and `uv.lock`)
-- **Telegram Client**: `python-telegram-bot>=20.8` (async/await native)
+- **Telegram Client (metadata)**: `python-telegram-bot>=20.8` (async/await native)
+- **Upload Transport**: `telethon>=1.36` (MTProto, bot-token login, 2 GB uploads)
 - **Database Driver**: `aiosqlite>=0.19.0` (non-blocking async SQLite)
 - **CLI Framework**: `typer>=0.12,<1.0` (wrapped with `asyncio.run()`)
 - **Terminal UI**: `rich>=13.0.0` (progress bars, tables, trees, logging handler)
@@ -84,7 +85,7 @@ async with app:
 * **Drive Model**: Every Telegram `chat_id` represents an isolated drive bucket.
 * **VFS Path Rule**: All paths MUST be root-relative POSIX paths starting with `/` (e.g., `/docs/file.pdf`). Uploading a local folder `/home/user/code` mounts at root: `/code/`.
 * **Media Routing & MIME Fallback**: Use `filetype.guess()` to inspect magic bytes and route via `send_photo`, `send_video`, `send_audio`, or `send_document`. Because `filetype` is unmaintained (last release 2023) and may miss newer formats or extension-only definitions, implement a mandatory fallback to Python's built-in `mimetypes.guess_type(file_path)` when `filetype.guess()` returns `None`. Allow CLI override flags (`--as-doc`, `--as-video`, `--as-audio`).
-* **50MB vs 2GB Limit**: If file > 50MB and `TELEGRAM_API_BASE_URL` is not set, abort immediately with a `Rich` error explaining local Bot API server configuration. Do not attempt upload.
+* **Upload Transport (MTProto)**: All uploads and server-side copies run over MTProto via `telethon` (bot-token login; requires `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` from my.telegram.org). Uniform 2 GB cap — abort with a `Rich` error above 2 GB. The Bot API (PTB) is retained only for metadata operations: chat validation, `edit_message_caption`, `delete_message`, and `getUpdates` draining. MTProto message IDs are chat-scoped and shared with the Bot API, so mv/rm interoperate; MTProto responses carry no Bot API `file_id` (store `""` in `vfs_index`), and `cp` re-sends the source message's media object instead.
 * **VFS Caption Protocol**: Every uploaded file MUST append this exact metadata block:
 ```text
 📁 `/virtual/path/file_name.ext`

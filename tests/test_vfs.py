@@ -8,7 +8,7 @@ import pytest
 import respx
 from typer.testing import CliRunner
 
-from tests.conftest import CHAT_ID
+from tests.conftest import CHAT_ID, FakeMtprotoClient
 from tup.cli import app
 from tup.config import default_database_path
 from tup.database import Database, VfsEntry
@@ -103,19 +103,19 @@ def test_rmdir_refuses_non_empty(seeded: None) -> None:
     assert result.exit_code == 1
 
 
-def test_cp_duplicates_by_file_id(seeded: None, telegram_api: respx.MockRouter) -> None:
+def test_cp_duplicates_via_media_reuse(seeded: None, mock_mtproto: FakeMtprotoClient) -> None:
     result = runner.invoke(app, ["cp", CHAT_ID, "/docs/a.pdf", "/archive/"])
     assert result.exit_code == 0, result.output
-    sends = calls_to(telegram_api, "sendDocument")
-    assert len(sends) == 1
-    assert b"fid-a" in sends[0]  # the file_id string was sent, not file bytes
+    assert len(mock_mtproto.sent) == 1
+    # the source message's media object was re-sent — no file bytes uploaded
+    assert mock_mtproto.sent[0]["file"] == "media-of-11"
     copy = read_vfs("/archive/", "a.pdf")
     assert copy is not None
-    assert copy.telegram_message_id == 101  # from the mocked response
+    assert copy.telegram_message_id == 101  # from the fake client
     assert read_vfs("/docs/", "a.pdf") is not None  # source untouched
 
 
-def test_cp_refuses_existing_destination(seeded: None, telegram_api: respx.MockRouter) -> None:
+def test_cp_refuses_existing_destination(seeded: None, mock_mtproto: FakeMtprotoClient) -> None:
     result = runner.invoke(app, ["cp", CHAT_ID, "/docs/a.pdf", "/docs/sub/a.pdf"])
     assert result.exit_code == 0
     again = runner.invoke(app, ["cp", CHAT_ID, "/docs/a.pdf", "/docs/sub/"])

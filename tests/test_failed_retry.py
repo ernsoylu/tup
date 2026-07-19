@@ -8,7 +8,7 @@ from pathlib import Path
 import respx
 from typer.testing import CliRunner
 
-from tests.conftest import CHAT_ID
+from tests.conftest import CHAT_ID, FakeMtprotoClient
 from tup.cli import app
 from tup.config import default_database_path
 from tup.database import Database, FailedUpload, VfsEntry
@@ -53,7 +53,7 @@ def test_failed_lists_pending(fake_env: str, tmp_path: Path) -> None:
 
 
 def test_retry_resolves_pending_upload(
-    fake_env: str, telegram_api: respx.MockRouter, tmp_path: Path
+    fake_env: str, mock_mtproto: FakeMtprotoClient, tmp_path: Path
 ) -> None:
     f = tmp_path / "doc.txt"
     f.write_bytes(b"data")
@@ -77,7 +77,7 @@ def test_retry_abandon_marks_abandoned(fake_env: str, tmp_path: Path) -> None:
 
 
 def test_logs_shows_recent_entries(
-    fake_env: str, telegram_api: respx.MockRouter, tmp_path: Path
+    fake_env: str, mock_mtproto: FakeMtprotoClient, tmp_path: Path
 ) -> None:
     f = tmp_path / "notes.txt"
     f.write_bytes(b"hello")
@@ -88,7 +88,12 @@ def test_logs_shows_recent_entries(
     assert "success" in result.output
 
 
-def test_end_to_end_scenario(fake_env: str, telegram_api: respx.MockRouter, tmp_path: Path) -> None:
+def test_end_to_end_scenario(
+    fake_env: str,
+    telegram_api: respx.MockRouter,
+    mock_mtproto: FakeMtprotoClient,
+    tmp_path: Path,
+) -> None:
     """chat add -> up -> ls -> mv -> rm -> logs, all against the mocked API."""
     assert runner.invoke(app, ["chat", "add", "work", CHAT_ID]).exit_code == 0
     f = tmp_path / "report.txt"

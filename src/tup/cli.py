@@ -25,12 +25,12 @@ from tup.uploader import (
     TupError,
     access_error,
     bot_session,
-    copy_by_file_id,
+    copy_message_media,
     delete_remote_message,
     edit_caption,
-    extract_file_id,
     format_caption,
     media_info,
+    mtproto_session,
     parse_caption,
     upload_file,
 )
@@ -275,14 +275,14 @@ def up(
         targets = _collect_targets(local, dest)
         async with Database(settings.database_path) as db:
             chat_id = await _resolve_drive_or_fail(db, to, settings)
-            async with bot_session(settings) as bot:
+            async with mtproto_session(settings) as client:
                 failures = 0
                 for file_path, dest_dir in targets:
                     try:
                         message_id = await upload_file(
                             db,
                             settings,
-                            bot,
+                            client,
                             file_path,
                             chat_id,
                             dest_dir,
@@ -503,35 +503,29 @@ def cp(
         async with Database(settings.database_path) as db:
             chat_id = await db.resolve_drive(drive)
             entry = await _require_entry(db, chat_id, src)
-            if not entry.telegram_file_id:
-                raise TupError(
-                    f"{entry.file_name} was uploaded via MTProto (large file) and has no "
-                    "Bot API file_id, so server-side copy is unavailable.",
-                    hint="Re-upload it to the destination with [bold]tup up[/bold] instead.",
-                )
             dest_dir = _dest_directory(dest, entry.file_name)
             if await db.vfs_get(chat_id, dest_dir, entry.file_name) is not None:
                 raise TupError(f"Destination already exists: {dest_dir}{entry.file_name}")
             full_path = dest_dir + entry.file_name if dest_dir != "/" else "/" + entry.file_name
             caption = format_caption(full_path, entry.file_hash)
-            async with bot_session(settings) as bot:
-                message = await copy_by_file_id(
-                    bot, chat_id, entry.telegram_file_id, caption, max_retries=settings.max_retries
+            async with mtproto_session(settings) as client:
+                message_id = await copy_message_media(
+                    client,
+                    chat_id,
+                    entry.telegram_message_id,
+                    caption,
+                    max_retries=settings.max_retries,
                 )
-            try:
-                file_id = extract_file_id(message, "document")
-            except TupError:
-                file_id = entry.telegram_file_id
             await db.vfs_upsert(
                 chat_id,
                 dest_dir,
                 entry.file_name,
                 entry.file_size,
                 entry.file_hash,
-                file_id,
-                message.message_id,
+                "",
+                message_id,
             )
-        console.print(f"✅ {src} → {full_path} (message {message.message_id}, no re-upload)")
+        console.print(f"✅ {src} → {full_path} (message {message_id}, no re-upload)")
 
     run_async(_run())
 
@@ -651,7 +645,7 @@ def sync(
         uploaded = skipped = failed = 0
         async with Database(settings.database_path) as db:
             chat_id = await db.resolve_drive(drive)
-            async with bot_session(settings) as bot:
+            async with mtproto_session(settings) as client:
                 for file_path, dest_dir in targets:
                     local_hash = _hash_local(file_path)
                     existing = await db.vfs_get(chat_id, dest_dir, file_path.name)
@@ -659,7 +653,7 @@ def sync(
                         skipped += 1
                         continue
                     try:
-                        await upload_file(db, settings, bot, file_path, chat_id, dest_dir)
+                        await upload_file(db, settings, client, file_path, chat_id, dest_dir)
                         uploaded += 1
                         console.print(f"⬆️  {file_path.name} → {dest_dir}")
                     except TupError as exc:
@@ -813,7 +807,7 @@ def retry(
                 console.print(f"✅ Abandoned {len(pending)} item(s).")
                 return
             resolved = still_failing = 0
-            async with bot_session(settings) as bot:
+            async with mtproto_session(settings) as client:
                 for item in pending:
                     file_path = Path(item.file_path)
                     meta = parse_caption(item.caption)
@@ -822,7 +816,7 @@ def retry(
                         await upload_file(
                             db,
                             settings,
-                            bot,
+                            client,
                             file_path,
                             item.chat_id,
                             dest_dir,
