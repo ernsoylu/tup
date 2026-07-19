@@ -26,6 +26,7 @@ def isolate_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect TUP_CONFIG_DIR and cwd into tmp_path for every test."""
     config_dir = tmp_path / "config"
     monkeypatch.setenv("TUP_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("TUP_CACHE_DIR", str(tmp_path / "tui-cache"))
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     # Wide console so rich tables don't truncate paths and messages don't wrap
     # mid-word, which would break substring assertions.
@@ -157,6 +158,7 @@ class FakeMtprotoClient:
         self.sent: list[dict[str, Any]] = []
         self.next_id = 101
         self.existing_ids: set[int] | None = None  # None = every message exists
+        self.download_payload = b"data"
 
     async def get_input_entity(self, peer: Any) -> Any:
         return peer
@@ -176,6 +178,20 @@ class FakeMtprotoClient:
         if isinstance(ids, list):
             return [self._message(i) for i in ids]
         return self._message(ids)
+
+    def _write_download(self, file: Any) -> str:
+        path = Path(str(file))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(self.download_payload)
+        return str(path)
+
+    async def download_media(
+        self, message: Any, file: Any = None, progress_callback: Any = None
+    ) -> str:
+        result = self._write_download(file)
+        if progress_callback is not None:
+            progress_callback(len(self.download_payload), len(self.download_payload))
+        return result
 
 
 @pytest.fixture

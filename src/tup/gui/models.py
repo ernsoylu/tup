@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from PyQt6.QtCore import QAbstractTableModel, QModelIndex, QObject, QSortFilterProxyModel, Qt
@@ -22,7 +23,7 @@ __all__ = [
     "human_size",
 ]
 
-COLUMNS = ("Name", "Size", "Kind", "Modified")
+COLUMNS = ("Name", "Size", "Kind", "Modified", "Status")
 
 
 @dataclass
@@ -73,10 +74,15 @@ class FileRow:
     kind: str
     modified: str  # ISO prefix 'YYYY-MM-DD HH:MM:SS' (sortable), '' for folders
     entry: VfsEntry | None = None
+    downloaded: bool = False
 
 
 def build_rows(
-    entries: list[VfsEntry], dir_path: str, *, show_hidden: bool = False
+    entries: list[VfsEntry],
+    dir_path: str,
+    *,
+    show_hidden: bool = False,
+    is_downloaded: Callable[[VfsEntry], bool] | None = None,
 ) -> list[FileRow]:
     """Folders + files directly inside `dir_path`, honoring the hidden toggle."""
     rows = [
@@ -97,6 +103,7 @@ def build_rows(
                 kind=kind_label(entry.file_name),
                 modified=entry.upload_timestamp[:19].replace("T", " "),
                 entry=entry,
+                downloaded=bool(is_downloaded and is_downloaded(entry)),
             )
         )
     return rows
@@ -158,6 +165,8 @@ class FileTableModel(QAbstractTableModel):
                 return row.kind
             if column == 3:
                 return row.modified
+            if column == 4:
+                return "✓ Downloaded" if row.downloaded else ""
         if role == Qt.ItemDataRole.DecorationRole and column == 0:
             return self._folder_icon if row.is_dir else self._file_icon
         return None
@@ -191,4 +200,6 @@ class FileSortProxy(QSortFilterProxyModel):
             return a.kind.lower() < b.kind.lower()
         if column == 3 and a.modified != b.modified:
             return a.modified < b.modified
+        if column == 4 and a.downloaded != b.downloaded:
+            return b.downloaded
         return a.name.lower() < b.name.lower()

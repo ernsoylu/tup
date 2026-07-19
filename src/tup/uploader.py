@@ -434,6 +434,51 @@ async def upload_file(
     return message_id
 
 
+def _prepare_download_dest(dest: Path) -> Path:
+    """Ensure the parent folder exists; return the temporary .part path."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    return dest.with_name(dest.name + ".part")
+
+
+def _finalize_download(part: str, dest: Path) -> None:
+    Path(part).replace(dest)
+
+
+async def download_media_file(
+    client: TelegramClient,
+    chat_id: str,
+    message_id: int,
+    dest: Path,
+    *,
+    max_retries: int,
+    progress: Callable[[int, int], None] | None = None,
+) -> Path:
+    """Download a message's media to `dest` over MTProto.
+
+    Writes to a `.part` file and renames on completion so an interrupted
+    download never masquerades as a finished one.
+    """
+
+    async def _download() -> Path:
+        peer = await resolve_peer(client, chat_id)
+        message = await client.get_messages(peer, ids=message_id)
+        if message is None or message.media is None:
+            raise TupError(
+                f"Message {message_id} has no media on Telegram.",
+                hint="Run [bold]tup index --prune[/bold] to reconcile the local index.",
+            )
+        part = _prepare_download_dest(dest)
+        result = await client.download_media(message, file=str(part), progress_callback=progress)
+        if result is None:
+            raise TupError(f"Download of message {message_id} produced no file.")
+        _finalize_download(str(result), dest)
+        return dest
+
+    return await _mtproto_with_retry(
+        _download, max_retries=max_retries, what=f"download {dest.name}"
+    )
+
+
 async def copy_message_media(
     client: TelegramClient, chat_id: str, message_id: int, caption: str, *, max_retries: int
 ) -> int:

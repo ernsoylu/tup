@@ -2,8 +2,20 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QModelIndex, QSize, Qt
-from PyQt6.QtGui import QAction, QActionGroup, QCloseEvent, QIcon, QStandardItem, QStandardItemModel
+import subprocess
+import sys
+from pathlib import Path
+
+from PyQt6.QtCore import QModelIndex, QPoint, QSize, Qt, QUrl
+from PyQt6.QtGui import (
+    QAction,
+    QActionGroup,
+    QCloseEvent,
+    QDesktopServices,
+    QIcon,
+    QStandardItem,
+    QStandardItemModel,
+)
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -11,6 +23,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QListView,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QSplitter,
     QStackedWidget,
@@ -22,6 +35,7 @@ from PyQt6.QtWidgets import (
 
 from tup.database import ChatAlias, VfsEntry
 from tup.gui.bridge import CoreBridge
+from tup.gui.cache import cached_path, is_cached
 from tup.gui.models import (
     DirNode,
     FileRow,
@@ -31,6 +45,7 @@ from tup.gui.models import (
     build_rows,
     human_size,
 )
+from tup.uploader import download_media_file, mtproto_session
 from tup.utils import VfsPathError, normalize_vfs_path
 
 PATH_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -51,6 +66,7 @@ class MainWindow(QMainWindow):
         self.current_dir = "/"
         self.show_hidden = False
         self.suppress_dialogs = False  # tests flip this to avoid modal boxes
+        self.open_files_externally = True  # tests flip this to avoid launching apps
 
         self.setWindowTitle("tup — Telegram Drive")
         self.resize(1150, 720)
@@ -101,6 +117,8 @@ class MainWindow(QMainWindow):
             horizontal_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
             horizontal_header.setStretchLastSection(False)
         self.table_view.doubleClicked.connect(self._on_double_clicked)
+        self.table_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table_view.customContextMenuRequested.connect(self._on_context_menu)
 
         self.icon_view = QListView()
         self.icon_view.setModel(self.file_proxy)
@@ -112,6 +130,8 @@ class MainWindow(QMainWindow):
         self.icon_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.icon_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.icon_view.doubleClicked.connect(self._on_double_clicked)
+        self.icon_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.icon_view.customContextMenuRequested.connect(self._on_context_menu)
 
         self.views = QStackedWidget()
         self.views.addWidget(self.table_view)
@@ -252,7 +272,7 @@ class MainWindow(QMainWindow):
     def set_current_dir(self, path: str) -> None:
         self.current_dir = path
         self.path_edit.setText(path)
-        rows = build_rows(self.entries, path, show_hidden=self.show_hidden)
+        rows = build_rows(self.entries, path, show_hidden=self.show_hidden, is_downloaded=is_cached)
         self.file_model.set_rows(rows)
         folders = sum(1 for r in rows if r.is_dir)
         files = len(rows) - folders
@@ -297,8 +317,68 @@ class MainWindow(QMainWindow):
             self.open_row(row)
 
     def open_row(self, row: FileRow) -> None:
-        # Phase 2 wires this to download-and-open; browsing-only for now.
-        self._status(f"{row.name}: download-on-open arrives in the next update.")
+        self.download_row(row, open_after=True)
+
+    def download_row(self, row: FileRow, *, open_after: bool = False) -> None:
+        """Fetch the file into the local cache; optionally open it when ready."""
+        entry = row.entry
+        if entry is None:
+            return
+        if is_cached(entry):
+            if open_after:
+                self._open_local(cached_path(entry))
+            else:
+                self._status(f"{entry.file_name} is already downloaded.")
+            return
+        self._status(f"Downloading {entry.file_name}…")
+
+        def _done(path: Path) -> None:
+            self.set_current_dir(self.current_dir)  # refresh Downloaded badges
+            self._status(f"Downloaded {path.name}")
+            if open_after:
+                self._open_local(path)
+
+        self.bridge.submit(self._download_entry(entry), _done, self._show_error)
+
+    async def _download_entry(self, entry: VfsEntry) -> Path:
+        dest = cached_path(entry)
+        async with mtproto_session(self.bridge.settings) as client:
+            return await download_media_file(
+                client,
+                entry.chat_id,
+                entry.telegram_message_id,
+                dest,
+                max_retries=self.bridge.settings.max_retries,
+            )
+
+    def _open_local(self, path: Path) -> None:
+        if self.open_files_externally:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _reveal_local(self, path: Path) -> None:
+        if sys.platform == "darwin":
+            subprocess.run(["/usr/bin/open", "-R", str(path)], check=False)  # noqa: S603
+        else:  # pragma: no cover - non-macOS fallback opens the parent folder
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
+
+    def _on_context_menu(self, pos: QPoint) -> None:
+        view = self.table_view if self.views.currentIndex() == 0 else self.icon_view
+        index = view.indexAt(pos)
+        if not index.isValid():
+            return
+        row = self.file_model.row_at(self.file_proxy.mapToSource(index).row())
+        menu = QMenu(self)
+        if row.is_dir:
+            menu.addAction("Open", lambda: self._on_double_clicked(index))
+        else:
+            menu.addAction("Open", lambda: self.open_row(row))
+            menu.addAction("Download", lambda: self.download_row(row))
+            entry = row.entry
+            if entry is not None and is_cached(entry):
+                menu.addAction("Show in Finder", lambda: self._reveal_local(cached_path(entry)))
+        viewport = view.viewport()
+        anchor = viewport if viewport is not None else view
+        menu.exec(anchor.mapToGlobal(pos))
 
     def _go_up(self) -> None:
         if self.current_dir == "/":
