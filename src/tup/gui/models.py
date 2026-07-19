@@ -17,6 +17,7 @@ __all__ = [
     "FileRow",
     "FileSortProxy",
     "FileTableModel",
+    "all_dir_paths",
     "build_dir_tree",
     "build_rows",
     "child_dirs",
@@ -55,6 +56,19 @@ def child_dirs(entries: list[VfsEntry], base: str) -> list[str]:
             continue
         children.add(entry.virtual_path[len(base) :].split("/", 1)[0])
     return sorted(children)
+
+
+def all_dir_paths(entries: list[VfsEntry]) -> list[str]:
+    """Every directory path in the drive, root first, depth order."""
+    paths: set[str] = {"/"}
+
+    def walk(node: DirNode) -> None:
+        for child in node.children.values():
+            paths.add(child.path)
+            walk(child)
+
+    walk(build_dir_tree(entries))
+    return sorted(paths)
 
 
 def kind_label(name: str) -> str:

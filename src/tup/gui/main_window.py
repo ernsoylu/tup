@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QDockWidget,
     QFileDialog,
     QHeaderView,
+    QInputDialog,
     QLineEdit,
     QListView,
     QMainWindow,
@@ -40,18 +41,21 @@ from PyQt6.QtWidgets import (
     QTreeView,
 )
 
-from tup.database import ChatAlias, VfsEntry
+from tup.database import ChatAlias, UploadLogEntry, VfsEntry
 from tup.gui.bridge import CoreBridge
 from tup.gui.cache import cached_path, is_cached
+from tup.gui.dialogs import ChatsDialog, LogsDialog
 from tup.gui.models import (
     DirNode,
     FileRow,
     FileSortProxy,
     FileTableModel,
+    all_dir_paths,
     build_dir_tree,
     build_rows,
     human_size,
 )
+from tup.gui.ops import op_cp, op_mkdir, op_mv, op_prune, op_retry_failed, op_rm, op_rmdir
 from tup.gui.transfers import Transfer, TransferManager, collect_upload_targets
 from tup.gui.transfers_panel import TransfersPanel
 from tup.uploader import download_media_file, upload_file
@@ -284,6 +288,30 @@ class MainWindow(QMainWindow):
             lambda: self.transfers_dock.setVisible(not self.transfers_dock.isVisible())
         )
         toolbar.addAction(self.transfers_action)
+
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setPlaceholderText("Filter…")
+        self.filter_edit.setClearButtonEnabled(True)
+        self.filter_edit.setMaximumWidth(180)
+        self.filter_edit.textChanged.connect(self.file_proxy.setFilterFixedString)
+        toolbar.addWidget(self.filter_edit)
+
+        self._build_menu()
+
+    def _build_menu(self) -> None:
+        menu_bar = self.menuBar()
+        if menu_bar is None:  # pragma: no cover - always present on a QMainWindow
+            return
+        drive_menu = menu_bar.addMenu("&Drive")
+        if drive_menu is None:  # pragma: no cover
+            return
+        drive_menu.addAction("New folder…", self._prompt_new_folder)
+        drive_menu.addSeparator()
+        drive_menu.addAction("Prune deleted messages", self._confirm_prune)
+        drive_menu.addAction("Retry failed uploads", self.retry_failed)
+        drive_menu.addSeparator()
+        drive_menu.addAction("Upload log…", self._show_logs)
+        drive_menu.addAction("Manage drives…", self._show_chats)
 
     def _build_transfers_dock(self) -> None:
         self.transfers_panel = TransfersPanel(
@@ -550,21 +578,176 @@ class MainWindow(QMainWindow):
     def _on_context_menu(self, pos: QPoint) -> None:
         view = self.table_view if self.views.currentIndex() == 0 else self.icon_view
         index = view.indexAt(pos)
-        if not index.isValid():
-            return
-        row = self.file_model.row_at(self.file_proxy.mapToSource(index).row())
         menu = QMenu(self)
-        if row.is_dir:
-            menu.addAction("Open", lambda: self._on_double_clicked(index))
+        if not index.isValid():
+            menu.addAction("New folder…", self._prompt_new_folder)
+            menu.addAction("Upload files…", self._pick_upload_files)
+            menu.addAction("⟳ Refresh", lambda: self.refresh())
         else:
-            menu.addAction("Open", lambda: self.open_row(row))
-            menu.addAction("Download", lambda: self.download_row(row))
-            entry = row.entry
-            if entry is not None and is_cached(entry):
-                menu.addAction("Show in Finder", lambda: self._reveal_local(cached_path(entry)))
+            row = self.file_model.row_at(self.file_proxy.mapToSource(index).row())
+            if row.is_dir:
+                menu.addAction("Open", lambda: self._on_double_clicked(index))
+                menu.addSeparator()
+                menu.addAction("Delete folder", lambda: self._confirm_delete(row))
+            else:
+                menu.addAction("Open", lambda: self.open_row(row))
+                menu.addAction("Download", lambda: self.download_row(row))
+                entry = row.entry
+                if entry is not None and is_cached(entry):
+                    menu.addAction("Show in Finder", lambda: self._reveal_local(cached_path(entry)))
+                menu.addSeparator()
+                menu.addAction("Copy to…", lambda: self._prompt_copy(row))
+                menu.addAction("Move to…", lambda: self._prompt_move(row))
+                menu.addSeparator()
+                menu.addAction("Delete", lambda: self._confirm_delete(row))
         viewport = view.viewport()
         anchor = viewport if viewport is not None else view
         menu.exec(anchor.mapToGlobal(pos))
+
+    # -- file operations (CLI parity) --------------------------------------------
+
+    def create_folder(self, name: str) -> None:
+        chat_id = self._current_chat_id()
+        if chat_id is None or not name:
+            return
+        target = self.current_dir + name
+
+        async def _run() -> str:
+            return await op_mkdir(self.bridge.db, chat_id, target)
+
+        self.bridge.submit(_run(), self._after_op, self._show_error)
+
+    def delete_row(self, row: FileRow) -> None:
+        chat_id = self._current_chat_id()
+        if chat_id is None:
+            return
+        if row.is_dir:
+
+            async def _rmdir() -> str:
+                removed = await op_rmdir(self.bridge.db, chat_id, self.current_dir + row.name)
+                return f"Removed {removed}"
+
+            self.bridge.submit(_rmdir(), self._after_op, self._show_error)
+            return
+        entry = row.entry
+        if entry is None:
+            return
+
+        async def _rm() -> str:
+            deleted = await op_rm(self.bridge.db, self.bridge.settings, chat_id, entry)
+            return f"Deleted {deleted}"
+
+        self.bridge.submit(_rm(), self._after_op, self._show_error)
+
+    def move_row(self, row: FileRow, dest_dir: str) -> None:
+        chat_id = self._current_chat_id()
+        entry = row.entry
+        if chat_id is None or entry is None:
+            return
+
+        async def _mv() -> str:
+            moved = await op_mv(self.bridge.db, self.bridge.settings, chat_id, entry, dest_dir)
+            return f"Moved to {moved}"
+
+        self.bridge.submit(_mv(), self._after_op, self._show_error)
+
+    def copy_row(self, row: FileRow, dest_dir: str) -> None:
+        chat_id = self._current_chat_id()
+        entry = row.entry
+        if chat_id is None or entry is None:
+            return
+
+        async def _cp() -> str:
+            client = await self.bridge.mtproto()
+            copied = await op_cp(
+                self.bridge.db, self.bridge.settings, client, chat_id, entry, dest_dir
+            )
+            return f"Copied to {copied} (server-side, no re-upload)"
+
+        self.bridge.submit(_cp(), self._after_op, self._show_error)
+
+    def prune_drive(self) -> None:
+        chat_id = self._current_chat_id()
+        if chat_id is None:
+            return
+
+        async def _prune() -> str:
+            client = await self.bridge.mtproto()
+            pruned = await op_prune(self.bridge.db, self.bridge.settings, client, chat_id)
+            return f"Pruned {len(pruned)} stale row(s)."
+
+        self.bridge.submit(_prune(), self._after_op, self._show_error)
+
+    def retry_failed(self) -> None:
+        async def _retry() -> str:
+            client = await self.bridge.mtproto()
+            resolved, still_failing = await op_retry_failed(
+                self.bridge.db, self.bridge.settings, client
+            )
+            return f"Retry finished: {resolved} resolved, {still_failing} still pending."
+
+        self.bridge.submit(_retry(), self._after_op, self._show_error)
+
+    def _after_op(self, message: str) -> None:
+        self._status(message)
+        self.refresh()
+
+    # -- prompts ------------------------------------------------------------------
+
+    def _prompt_new_folder(self) -> None:
+        name, ok = QInputDialog.getText(self, "New folder", "Folder name:")
+        if ok and name.strip():
+            self.create_folder(name.strip())
+
+    def _prompt_destination(self, title: str) -> str | None:
+        choices = all_dir_paths(self.entries)
+        dest, ok = QInputDialog.getItem(self, title, "Destination folder:", choices, 0, True)
+        return dest if ok and dest else None
+
+    def _prompt_move(self, row: FileRow) -> None:
+        dest = self._prompt_destination(f"Move {row.name}")
+        if dest is not None:
+            self.move_row(row, dest)
+
+    def _prompt_copy(self, row: FileRow) -> None:
+        dest = self._prompt_destination(f"Copy {row.name}")
+        if dest is not None:
+            self.copy_row(row, dest)
+
+    def _confirm_delete(self, row: FileRow) -> None:
+        if not self.suppress_dialogs:
+            what = f"folder {row.name}" if row.is_dir else row.name
+            answer = QMessageBox.question(self, "Delete", f"Delete {what} from Telegram?")
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.delete_row(row)
+
+    def _confirm_prune(self) -> None:
+        if not self.suppress_dialogs:
+            answer = QMessageBox.question(
+                self,
+                "Prune",
+                "Remove index rows whose Telegram messages were deleted natively?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.prune_drive()
+
+    # -- dialogs ------------------------------------------------------------------
+
+    def _show_logs(self) -> None:
+        async def _fetch() -> list[UploadLogEntry]:
+            return await self.bridge.db.log_recent(limit=50)
+
+        def _open(entries: list[UploadLogEntry]) -> None:
+            LogsDialog(entries, self).exec()
+
+        self.bridge.submit(_fetch(), _open, self._show_error)
+
+    def _show_chats(self) -> None:
+        dialog = ChatsDialog(self.bridge, self)
+        dialog.exec()
+        self._reload_drives()
 
     def _go_up(self) -> None:
         if self.current_dir == "/":
