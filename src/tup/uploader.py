@@ -24,7 +24,12 @@ from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, Time
 from telegram.ext import Application
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
-from telethon.tl.types import InputPeerChannel, InputPeerChat, InputPeerUser
+from telethon.tl.types import (
+    DocumentAttributeVideo,
+    InputPeerChannel,
+    InputPeerChat,
+    InputPeerUser,
+)
 
 from tup.config import Settings, config_dir
 from tup.database import Database
@@ -290,6 +295,40 @@ def _stat_upload_size(local_path: Path) -> int:
     return local_path.stat().st_size
 
 
+def video_attributes(path: Path) -> list[DocumentAttributeVideo] | None:
+    """Real width/height/duration so Telegram renders the correct aspect ratio.
+
+    Without an explicit DocumentAttributeVideo, Telegram guesses the display
+    size and the video shows with wrong dimensions. Returns None when the
+    container can't be parsed — Telethon then falls back to its own defaults.
+    """
+    try:
+        from hachoir.metadata import extractMetadata
+        from hachoir.parser import createParser
+
+        parser = createParser(str(path))
+        if parser is None:
+            return None
+        with parser:
+            metadata = extractMetadata(parser)
+        if metadata is None or not (metadata.has("width") and metadata.has("height")):
+            return None
+        duration = 0
+        if metadata.has("duration"):
+            duration = int(metadata.get("duration").total_seconds())
+        return [
+            DocumentAttributeVideo(
+                duration=duration,
+                w=int(metadata.get("width")),
+                h=int(metadata.get("height")),
+                supports_streaming=True,
+            )
+        ]
+    except Exception:
+        logger.warning("Could not extract video metadata from %s; using defaults", path)
+        return None
+
+
 async def _mtproto_with_retry[T](
     operation: Callable[[], Awaitable[T]],
     *,
@@ -351,6 +390,8 @@ async def upload_file(
     caption = format_caption(full_path, file_hash, user_caption)
     _mime, kind = resolve_kind(local_path, as_doc=as_doc, as_video=as_video, as_audio=as_audio)
 
+    attributes = video_attributes(local_path) if kind == "video" else None
+
     async def _send() -> int:
         peer = await resolve_peer(client, chat_id)
         with make_progress(transient=True) as progress:
@@ -366,6 +407,7 @@ async def upload_file(
                 parse_mode=None,  # keep the caption protocol block raw
                 force_document=(kind == "document"),
                 supports_streaming=(kind == "video"),
+                attributes=attributes,  # real w/h/duration so Telegram renders correctly
                 silent=silent,
                 progress_callback=on_progress,
             )

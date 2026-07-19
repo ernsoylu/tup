@@ -24,6 +24,7 @@ from tup.uploader import (
     resolve_kind,
     send_with_retry,
     upload_file,
+    video_attributes,
 )
 
 HASH = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
@@ -182,6 +183,40 @@ async def test_upload_routes_video_as_streaming_media(
     sent = client.sent[0]
     assert sent["force_document"] is False  # browsable in the media gallery
     assert sent["supports_streaming"] is True
+
+
+def test_video_attributes_none_for_unparseable_file(tmp_path: Path) -> None:
+    f = tmp_path / "garbage.mp4"
+    f.write_bytes(b"\x00" * 64)  # not a valid container
+    assert video_attributes(f) is None
+
+
+async def test_upload_video_passes_extracted_dimensions(
+    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import tup.uploader as uploader_module
+
+    client = FakeMtprotoClient()
+    f = tmp_path / "movie.mp4"
+    f.write_bytes(b"\x00" * 64)
+    sentinel = ["video-attrs-1080x1920"]
+    monkeypatch.setattr(uploader_module, "video_attributes", lambda path: sentinel)
+
+    await upload_file(db, settings, client, f, CHAT_ID, "/videos")
+
+    assert client.sent[0]["attributes"] == sentinel
+
+
+async def test_upload_document_passes_no_attributes(
+    settings: Settings, db: Database, tmp_path: Path
+) -> None:
+    client = FakeMtprotoClient()
+    f = tmp_path / "notes.txt"
+    f.write_bytes(b"hello")
+
+    await upload_file(db, settings, client, f, CHAT_ID, "/docs")
+
+    assert client.sent[0]["attributes"] is None
 
 
 async def test_upload_failure_lands_in_failed_registry(
