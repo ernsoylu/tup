@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     telegram_api_base_url: HttpUrl | None = Field(
         None, description="Local Bot API URL for 2GB limits"
     )
+    telegram_api_id: int | None = Field(
+        None, description="my.telegram.org api_id (enables MTProto uploads up to 2GB)"
+    )
+    telegram_api_hash: SecretStr | None = Field(
+        None, description="my.telegram.org api_hash (enables MTProto uploads up to 2GB)"
+    )
     max_retries: int = Field(3, ge=1, le=10)
     request_timeout: int = Field(120, ge=10, le=3600)
     database_path: Path = Field(default_factory=default_database_path)

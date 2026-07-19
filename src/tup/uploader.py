@@ -10,13 +10,15 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
+from typing import Literal
 
 from telegram import Bot, Message
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
 from telegram.ext import Application
 
-from tup.config import Settings
+from tup.config import Settings, config_dir
 from tup.database import Database
+from tup.progress import make_progress
 from tup.utils import MediaKind, detect_mime, normalize_vfs_path, sha256_file
 
 logger = logging.getLogger("tup.uploader")
@@ -142,15 +144,105 @@ async def send_with_retry[T](
             await asyncio.sleep(wait)
 
 
-def check_size_limit(path: Path, size: int, settings: Settings) -> None:
-    if size > BOT_API_LIMIT_BYTES and settings.telegram_api_base_url is None:
-        raise TupError(
-            f"{path.name} is {size / (1024 * 1024):.1f} MB — the public Bot API caps uploads at 50 MB.",
-            hint=(
-                "Run a local Bot API server and set TELEGRAM_API_BASE_URL "
-                "to raise the limit to 2 GB."
-            ),
-        )
+Transport = Literal["botapi", "mtproto"]
+
+
+def decide_transport(path: Path, size: int, settings: Settings) -> Transport:
+    """Pick the upload transport for a file, enforcing the 50 MB Bot API cap.
+
+    Over 50 MB: a local Bot API server (TELEGRAM_API_BASE_URL) keeps the
+    Bot API path; otherwise MTProto via Telethon (TELEGRAM_API_ID/HASH)
+    raises the cap to 2 GB. With neither configured, abort before sending.
+    """
+    if size <= BOT_API_LIMIT_BYTES or settings.telegram_api_base_url is not None:
+        return "botapi"
+    if settings.telegram_api_id and settings.telegram_api_hash:
+        return "mtproto"
+    raise TupError(
+        f"{path.name} is {size / (1024 * 1024):.1f} MB — the public Bot API caps uploads at 50 MB.",
+        hint=(
+            "Set TELEGRAM_API_ID and TELEGRAM_API_HASH (from my.telegram.org) to upload "
+            "up to 2 GB via MTProto, or run a local Bot API server and set "
+            "TELEGRAM_API_BASE_URL."
+        ),
+    )
+
+
+async def upload_via_mtproto(
+    settings: Settings,
+    local_path: Path,
+    chat_id: str,
+    caption: str,
+    kind: MediaKind,
+    *,
+    silent: bool = False,
+) -> int:
+    """Upload a large file over MTProto (Telethon, bot-token login); returns message_id.
+
+    Message IDs are chat-scoped and shared between MTProto and the Bot API,
+    so mv/rm keep working on entries uploaded this way. There is no Bot API
+    file_id in the MTProto response, so cp is unavailable for these entries.
+    """
+    from telethon import TelegramClient
+    from telethon.tl.types import InputPeerChannel, InputPeerChat, InputPeerUser
+
+    assert settings.telegram_api_id and settings.telegram_api_hash  # noqa: S101 - guarded by decide_transport
+    session_path = config_dir() / "tup-mtproto"
+    client = TelegramClient(
+        str(session_path),
+        settings.telegram_api_id,
+        settings.telegram_api_hash.get_secret_value(),
+    )
+    try:
+        numeric_id = int(chat_id)
+    except ValueError as exc:
+        raise TupError(f"MTProto uploads need a numeric chat_id, got {chat_id!r}") from exc
+
+    await client.start(bot_token=settings.telegram_bot_token.get_secret_value())
+    _secure_session_file(session_path)
+    try:
+        try:
+            peer = await client.get_input_entity(numeric_id)
+        except ValueError:
+            # Fresh bot sessions have an empty entity cache; bots may address
+            # chats they are a member of with access_hash 0.
+            if str(numeric_id).startswith("-100"):
+                peer = InputPeerChannel(int(str(numeric_id)[4:]), 0)
+            elif numeric_id < 0:
+                peer = InputPeerChat(-numeric_id)
+            else:
+                peer = InputPeerUser(numeric_id, 0)
+        total_size = _stat_upload_size(local_path)
+        with make_progress(transient=True) as progress:
+            task_id = progress.add_task(local_path.name, total=total_size)
+
+            def on_progress(sent: int, _total: int) -> None:
+                progress.update(task_id, completed=sent)
+
+            message = await client.send_file(
+                peer,
+                str(local_path),
+                caption=caption,
+                parse_mode=None,  # keep the caption protocol block raw
+                force_document=(kind == "document"),
+                supports_streaming=(kind == "video"),
+                silent=silent,
+                progress_callback=on_progress,
+            )
+        return int(message.id)
+    except TupError:
+        raise
+    except Exception as exc:
+        raise TupError(f"MTProto upload of {local_path.name} failed: {exc}") from exc
+    finally:
+        await client.disconnect()
+
+
+def _secure_session_file(session_path: Path) -> None:
+    # The .session file holds the MTProto auth key — same secrecy as the token.
+    actual = session_path.with_suffix(".session")
+    if actual.exists():
+        actual.chmod(0o600)
 
 
 def resolve_kind(
@@ -284,14 +376,15 @@ async def upload_file(
     as_audio: bool = False,
     silent: bool = False,
     user_caption: str | None = None,
-) -> Message:
+) -> int:
     """Upload one file: preflight, caption, send with retry, then index + log.
 
-    Exhausted retries are recorded in failed_registry and uploads_log before
-    the TupError propagates (spec §8).
+    Returns the Telegram message_id. Files over 50 MB route through MTProto
+    when TELEGRAM_API_ID/HASH are configured. Exhausted retries are recorded
+    in failed_registry and uploads_log before the TupError propagates (spec §8).
     """
     size = _stat_upload_size(local_path)
-    check_size_limit(local_path, size, settings)
+    transport = decide_transport(local_path, size, settings)
 
     virtual_dir = normalize_vfs_path(dest_dir, directory=True)
     full_path = virtual_dir + local_path.name if virtual_dir != "/" else "/" + local_path.name
@@ -299,12 +392,20 @@ async def upload_file(
     caption = format_caption(full_path, file_hash, user_caption)
     _mime, kind = resolve_kind(local_path, as_doc=as_doc, as_video=as_video, as_audio=as_audio)
 
+    file_id = ""  # MTProto responses carry no Bot API file_id (cp unavailable)
     try:
-        message = await send_with_retry(
-            lambda: _dispatch_send(bot, chat_id, local_path, kind, caption, silent=silent),
-            max_retries=settings.max_retries,
-            what=f"upload {local_path.name}",
-        )
+        if transport == "mtproto":
+            message_id = await upload_via_mtproto(
+                settings, local_path, chat_id, caption, kind, silent=silent
+            )
+        else:
+            message = await send_with_retry(
+                lambda: _dispatch_send(bot, chat_id, local_path, kind, caption, silent=silent),
+                max_retries=settings.max_retries,
+                what=f"upload {local_path.name}",
+            )
+            message_id = message.message_id
+            file_id = extract_file_id(message, kind)
     except TupError as exc:
         await db.failed_add(str(local_path), chat_id, caption, kind, str(exc))
         await db.log_upload(str(local_path), size, chat_id, kind, "failed", error_message=str(exc))
@@ -316,17 +417,19 @@ async def upload_file(
         await db.log_upload(str(local_path), size, chat_id, kind, "failed", error_message=str(exc))
         raise TupError(f"Telegram rejected {local_path.name}: {exc}") from exc
 
-    file_id = extract_file_id(message, kind)
-    await db.vfs_upsert(
-        chat_id, virtual_dir, local_path.name, size, file_hash, file_id, message.message_id
-    )
+    await db.vfs_upsert(chat_id, virtual_dir, local_path.name, size, file_hash, file_id, message_id)
     await db.log_upload(
-        str(local_path), size, chat_id, kind, "success", telegram_message_id=message.message_id
+        str(local_path), size, chat_id, kind, "success", telegram_message_id=message_id
     )
     logger.info(
-        "Uploaded %s -> chat %s as %s (message %d)", local_path, chat_id, kind, message.message_id
+        "Uploaded %s -> chat %s as %s via %s (message %d)",
+        local_path,
+        chat_id,
+        kind,
+        transport,
+        message_id,
     )
-    return message
+    return message_id
 
 
 def media_info(message: Message) -> tuple[str, int] | None:

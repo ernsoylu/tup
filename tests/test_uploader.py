@@ -12,13 +12,14 @@ import pytest_asyncio
 import respx
 from telegram.error import RetryAfter, TimedOut
 
+import tup.uploader as uploader_module
 from tests.conftest import CHAT_ID, make_settings
 from tup.config import Settings
 from tup.database import Database
 from tup.uploader import (
     TupError,
     bot_session,
-    check_size_limit,
+    decide_transport,
     format_caption,
     parse_caption,
     resolve_kind,
@@ -127,15 +128,29 @@ async def test_exhausted_retries_raise_tup_error(no_sleep: list[float]) -> None:
 # --- preflight & routing ------------------------------------------------------
 
 
-def test_size_gate_blocks_over_50mb_without_local_api(settings: Settings, tmp_path: Path) -> None:
+BIG = 51 * 1024 * 1024
+
+
+def test_size_gate_blocks_over_50mb_without_alternatives(
+    settings: Settings, tmp_path: Path
+) -> None:
     f = tmp_path / "big.bin"
     with pytest.raises(TupError, match="50 MB"):
-        check_size_limit(f, 51 * 1024 * 1024, settings)
+        decide_transport(f, BIG, settings)
 
 
-def test_size_gate_allows_with_local_api(tmp_path: Path) -> None:
+def test_small_files_use_bot_api(settings: Settings, tmp_path: Path) -> None:
+    assert decide_transport(tmp_path / "small.bin", 1024, settings) == "botapi"
+
+
+def test_local_api_server_keeps_bot_api_for_big_files(tmp_path: Path) -> None:
     settings = make_settings(base_url="http://localhost:8081")
-    check_size_limit(tmp_path / "big.bin", 51 * 1024 * 1024, settings)  # no raise
+    assert decide_transport(tmp_path / "big.bin", BIG, settings) == "botapi"
+
+
+def test_mtproto_chosen_for_big_files_with_api_credentials(tmp_path: Path) -> None:
+    settings = make_settings(api_id=12345, api_hash="f" * 32)
+    assert decide_transport(tmp_path / "big.bin", BIG, settings) == "mtproto"
 
 
 def test_resolve_kind_override_flags(tmp_path: Path) -> None:
@@ -155,8 +170,8 @@ async def test_upload_file_success_indexes_and_logs(
     f = tmp_path / "notes.txt"
     f.write_bytes(b"hello world")
     async with bot_session(settings) as bot:
-        message = await upload_file(db, settings, bot, f, CHAT_ID, "/docs")
-    assert message.message_id == 101
+        message_id = await upload_file(db, settings, bot, f, CHAT_ID, "/docs")
+    assert message_id == 101
     entry = await db.vfs_get(CHAT_ID, "/docs/", "notes.txt")
     assert entry is not None
     assert entry.file_hash == HASH
@@ -164,6 +179,29 @@ async def test_upload_file_success_indexes_and_logs(
     logs = await db.log_recent()
     assert logs[0].status == "success"
     assert logs[0].telegram_message_id == 101
+
+
+async def test_upload_file_routes_large_files_via_mtproto(
+    db: Database, mock_bot: AsyncMock, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    settings = make_settings(api_id=12345, api_hash="f" * 32)
+    f = tmp_path / "movie.mp4"
+    f.write_bytes(b"\x00" * 128)
+    monkeypatch.setattr(uploader_module, "BOT_API_LIMIT_BYTES", 64)  # force the large path
+    fake_mtproto = AsyncMock(return_value=777)
+    monkeypatch.setattr(uploader_module, "upload_via_mtproto", fake_mtproto)
+
+    message_id = await upload_file(db, settings, mock_bot, f, CHAT_ID, "/videos")
+
+    assert message_id == 777
+    fake_mtproto.assert_awaited_once()
+    mock_bot.send_video.assert_not_called()  # Bot API path skipped entirely
+    entry = await db.vfs_get(CHAT_ID, "/videos/", "movie.mp4")
+    assert entry is not None
+    assert entry.telegram_message_id == 777
+    assert entry.telegram_file_id == ""  # MTProto yields no Bot API file_id
+    logs = await db.log_recent()
+    assert logs[0].status == "success"
 
 
 async def test_upload_failure_lands_in_failed_registry(

@@ -13,6 +13,7 @@ dependencies = [
     "questionary>=2.0.0",
     "filetype>=1.2.0",
     "aiosqlite>=0.19.0",
+    "telethon>=1.36",
 ]
 
 [project.optional-dependencies]
@@ -55,7 +56,7 @@ warn_return_any = true
 warn_unused_configs = true
 
 [[tool.mypy.overrides]]
-module = ["questionary.*", "filetype.*"]
+module = ["questionary.*", "filetype.*", "telethon.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

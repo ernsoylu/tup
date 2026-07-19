@@ -32,11 +32,20 @@ def isolate_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return config_dir
 
 
-def make_settings(max_retries: int = 2, base_url: str | None = None) -> Settings:
+def make_settings(
+    max_retries: int = 2,
+    base_url: str | None = None,
+    api_id: int | None = None,
+    api_hash: str | None = None,
+) -> Settings:
     """Build Settings from a plain dict (sidesteps strict-mypy call-arg checks)."""
     data: dict[str, Any] = {"telegram_bot_token": FAKE_TOKEN, "max_retries": max_retries}
     if base_url:
         data["telegram_api_base_url"] = base_url
+    if api_id:
+        data["telegram_api_id"] = api_id
+    if api_hash:
+        data["telegram_api_hash"] = api_hash
     return Settings.model_validate(data)
 
 

@@ -279,7 +279,7 @@ def up(
                 failures = 0
                 for file_path, dest_dir in targets:
                     try:
-                        message = await upload_file(
+                        message_id = await upload_file(
                             db,
                             settings,
                             bot,
@@ -293,7 +293,7 @@ def up(
                             user_caption=caption,
                         )
                         console.print(
-                            f"✅ {file_path.name} → drive {chat_id} (message {message.message_id})"
+                            f"✅ {file_path.name} → drive {chat_id} (message {message_id})"
                         )
                     except TupError as exc:
                         if len(targets) == 1:
@@ -503,6 +503,12 @@ def cp(
         async with Database(settings.database_path) as db:
             chat_id = await db.resolve_drive(drive)
             entry = await _require_entry(db, chat_id, src)
+            if not entry.telegram_file_id:
+                raise TupError(
+                    f"{entry.file_name} was uploaded via MTProto (large file) and has no "
+                    "Bot API file_id, so server-side copy is unavailable.",
+                    hint="Re-upload it to the destination with [bold]tup up[/bold] instead.",
+                )
             dest_dir = _dest_directory(dest, entry.file_name)
             if await db.vfs_get(chat_id, dest_dir, entry.file_name) is not None:
                 raise TupError(f"Destination already exists: {dest_dir}{entry.file_name}")

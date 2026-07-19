@@ -57,12 +57,20 @@ def run_wizard() -> None:
     chat_type = questionary.select(
         "Default chat type:", choices=["group", "user", "channel"], default="group"
     ).ask()
+    api_id = questionary.text(
+        "my.telegram.org api_id (optional — enables >50MB uploads via MTProto):", default=""
+    ).ask()
+    api_hash = ""
+    if api_id and api_id.strip():
+        api_hash = questionary.password("my.telegram.org api_hash:").ask() or ""
 
     values = {
         "telegram_bot_token": token.strip(),
         "default_chat_id": (default_chat or "").strip(),
         "default_chat_type": chat_type or "group",
         "telegram_api_base_url": base_url or "",
+        "telegram_api_id": (api_id or "").strip(),
+        "telegram_api_hash": api_hash.strip(),
     }
     target = write_env_file(values)
     console.print(f"✅ Configuration written to [bold]{target}[/bold] (permissions 0600)")
