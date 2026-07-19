@@ -12,7 +12,8 @@ import typer
 from rich.logging import RichHandler
 from rich.panel import Panel
 from rich.table import Table
-from telegram.error import BadRequest, Forbidden
+from telegram import Bot, Update
+from telegram.error import BadRequest, Conflict, Forbidden
 from typer._click import Command, Context
 from typer._click.exceptions import UsageError
 from typer.core import TyperGroup
@@ -33,6 +34,7 @@ from tup.uploader import (
     media_info,
     mtproto_session,
     parse_caption,
+    send_with_retry,
     upload_file,
 )
 from tup.utils import (
@@ -702,13 +704,17 @@ def index(
     async def _run() -> None:
         settings = Settings.load()
         edits = added = seen = 0
-        async with Database(settings.database_path) as db:
-            chat_id = await db.resolve_drive(drive)
+        drain_error: str | None = None
+
+        async def drain(db: Database, bot: Bot, chat_id: str) -> None:
+            nonlocal seen, edits, added
             last_update_id = await db.sync_state_get(chat_id)
-            async with bot_session(settings) as bot:
-                while True:
-                    updates = await bot.get_updates(
-                        offset=last_update_id + 1 if last_update_id else None,
+            while True:
+                offset = last_update_id + 1 if last_update_id else None
+
+                async def _fetch(off: int | None = offset) -> tuple[Update, ...]:
+                    return await bot.get_updates(
+                        offset=off,
                         timeout=0,
                         allowed_updates=[
                             "message",
@@ -717,48 +723,60 @@ def index(
                             "edited_channel_post",
                         ],
                     )
-                    if not updates:
-                        break
-                    for update in updates:
-                        last_update_id = max(last_update_id, update.update_id)
-                        message = update.effective_message
-                        if message is None or str(message.chat.id) != chat_id:
+
+                updates = await send_with_retry(
+                    _fetch, max_retries=settings.max_retries, what="drain updates"
+                )
+                if not updates:
+                    break
+                for update in updates:
+                    last_update_id = max(last_update_id, update.update_id)
+                    message = update.effective_message
+                    if message is None or str(message.chat.id) != chat_id:
+                        continue
+                    seen += 1
+                    meta = parse_caption(message.caption)
+                    if meta is None:
+                        continue
+                    virtual_dir, file_name = split_vfs_path(meta.full_path)
+                    is_edit = (
+                        update.edited_message is not None or update.edited_channel_post is not None
+                    ) and message.edit_date is not None
+                    existing = await db.vfs_get_by_message(chat_id, message.message_id)
+                    if is_edit and existing is not None:
+                        if existing.virtual_path != virtual_dir or existing.file_name != file_name:
+                            await db.vfs_move(existing.id, virtual_dir, file_name)
+                            edits += 1
+                    elif existing is None and reconstruct:
+                        info = media_info(message)
+                        if info is None:
                             continue
-                        seen += 1
-                        meta = parse_caption(message.caption)
-                        if meta is None:
-                            continue
-                        virtual_dir, file_name = split_vfs_path(meta.full_path)
-                        is_edit = (
-                            update.edited_message is not None
-                            or update.edited_channel_post is not None
-                        ) and message.edit_date is not None
-                        existing = await db.vfs_get_by_message(chat_id, message.message_id)
-                        if is_edit and existing is not None:
-                            if (
-                                existing.virtual_path != virtual_dir
-                                or existing.file_name != file_name
-                            ):
-                                await db.vfs_move(existing.id, virtual_dir, file_name)
-                                edits += 1
-                        elif existing is None and reconstruct:
-                            info = media_info(message)
-                            if info is None:
-                                continue
-                            file_id, file_size = info
-                            await db.vfs_upsert(
-                                chat_id,
-                                virtual_dir,
-                                file_name,
-                                file_size,
-                                meta.sha256,
-                                file_id,
-                                message.message_id,
-                            )
-                            added += 1
+                        file_id, file_size = info
+                        await db.vfs_upsert(
+                            chat_id,
+                            virtual_dir,
+                            file_name,
+                            file_size,
+                            meta.sha256,
+                            file_id,
+                            message.message_id,
+                        )
+                        added += 1
             await db.sync_state_set(chat_id, last_update_id)
 
-            pruned = 0
+        pruned = 0
+        async with Database(settings.database_path) as db:
+            chat_id = await db.resolve_drive(drive)
+            async with bot_session(settings) as bot:
+                try:
+                    await drain(db, bot, chat_id)
+                except TupError as exc:
+                    drain_error = str(exc)
+                except Conflict:
+                    drain_error = (
+                        "another process is polling getUpdates with this bot token, "
+                        "so the update drain is unavailable"
+                    )
             if prune:
                 entries = [
                     e
@@ -781,6 +799,11 @@ def index(
                                 f"🗑  pruned {entry.virtual_path}{entry.file_name} "
                                 f"(message {entry.telegram_message_id} deleted on Telegram)"
                             )
+        if drain_error:
+            error_console.print(
+                f"⚠️  Update drain skipped: {drain_error}. "
+                "Caption edits made in Telegram were not synced this run."
+            )
         console.print(
             f"✅ Index reconciled: {seen} message(s) seen, {edits} caption edit(s) applied, "
             f"{added} row(s) reconstructed, {pruned} stale row(s) pruned."

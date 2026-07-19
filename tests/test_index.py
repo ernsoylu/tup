@@ -153,3 +153,37 @@ def test_index_prune_keeps_everything_when_nothing_deleted(
     assert result.exit_code == 0, result.output
     assert "0 stale row(s) pruned" in result.output
     assert read_vfs("/docs/", "a.pdf") is not None
+
+
+def test_index_prune_survives_getupdates_timeouts(
+    fake_env: str,
+    telegram_api: respx.MockRouter,
+    mock_mtproto: object,
+    monkeypatch: Any,
+) -> None:
+    """A dead/contended getUpdates (e.g. another poller on the token) must not
+    block pruning — the drain degrades to a warning and prune still runs."""
+    import asyncio as aio
+
+    import httpx
+
+    from tests.conftest import FakeMtprotoClient
+
+    assert isinstance(mock_mtproto, FakeMtprotoClient)
+
+    async def instant_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(aio, "sleep", instant_sleep)
+    telegram_api["getUpdates"].mock(side_effect=httpx.TimeoutException("timed out"))
+    seed_file("/docs/", "kept.pdf", 11)
+    seed_file("/docs/", "deleted.pdf", 12)
+    mock_mtproto.existing_ids = {11}
+
+    result = runner.invoke(app, ["index", CHAT_ID, "--prune"])
+    assert result.exit_code == 0, result.output
+    combined = result.output + (result.stderr or "")
+    assert "Update drain skipped" in combined
+    assert "1 stale row(s) pruned" in result.output
+    assert read_vfs("/docs/", "deleted.pdf") is None
+    assert read_vfs("/docs/", "kept.pdf") is not None
