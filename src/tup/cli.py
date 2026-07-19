@@ -28,6 +28,7 @@ from tup.uploader import (
     copy_message_media,
     delete_remote_message,
     edit_caption,
+    fetch_existing_ids,
     format_caption,
     media_info,
     mtproto_session,
@@ -680,13 +681,22 @@ def index(
             "--reconstruct", help="Also index tup-captioned messages missing from the DB."
         ),
     ] = False,
+    prune: Annotated[
+        bool,
+        typer.Option(
+            "--prune",
+            help="Remove index rows whose messages were deleted natively in Telegram "
+            "(verified over MTProto — the Bot API emits no deletion events).",
+        ),
+    ] = False,
 ) -> None:
     """Reconcile the local index with pending Telegram updates.
 
     Note: the Bot API has no message-history endpoint, so tup can only see
     pending updates (getUpdates) and its own uploads. Caption edits made
     natively in Telegram are applied to the index; with --reconstruct,
-    tup-captioned messages unknown to the DB are (re-)indexed.
+    tup-captioned messages unknown to the DB are (re-)indexed; with --prune,
+    rows for messages deleted directly in Telegram are removed.
     """
 
     async def _run() -> None:
@@ -747,9 +757,33 @@ def index(
                             )
                             added += 1
             await db.sync_state_set(chat_id, last_update_id)
+
+            pruned = 0
+            if prune:
+                entries = [
+                    e
+                    for e in await db.vfs_list_prefix(chat_id, "/")
+                    if e.telegram_message_id > 0  # .keep rows have no remote message
+                ]
+                if entries:
+                    async with mtproto_session(settings) as client:
+                        alive = await fetch_existing_ids(
+                            client,
+                            chat_id,
+                            [e.telegram_message_id for e in entries],
+                            max_retries=settings.max_retries,
+                        )
+                    for entry in entries:
+                        if entry.telegram_message_id not in alive:
+                            await db.vfs_delete(entry.id)
+                            pruned += 1
+                            console.print(
+                                f"🗑  pruned {entry.virtual_path}{entry.file_name} "
+                                f"(message {entry.telegram_message_id} deleted on Telegram)"
+                            )
         console.print(
             f"✅ Index reconciled: {seen} message(s) seen, {edits} caption edit(s) applied, "
-            f"{added} row(s) reconstructed."
+            f"{added} row(s) reconstructed, {pruned} stale row(s) pruned."
         )
 
     run_async(_run())

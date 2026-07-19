@@ -156,6 +156,7 @@ class FakeMtprotoClient:
     def __init__(self) -> None:
         self.sent: list[dict[str, Any]] = []
         self.next_id = 101
+        self.existing_ids: set[int] | None = None  # None = every message exists
 
     async def get_input_entity(self, peer: Any) -> Any:
         return peer
@@ -166,8 +167,15 @@ class FakeMtprotoClient:
         self.next_id += 1
         return message
 
-    async def get_messages(self, peer: Any, ids: int) -> Any:
-        return SimpleNamespace(id=ids, media=f"media-of-{ids}")
+    def _message(self, message_id: int) -> Any:
+        if self.existing_ids is not None and message_id not in self.existing_ids:
+            return None  # Telethon yields None placeholders for deleted messages
+        return SimpleNamespace(id=message_id, media=f"media-of-{message_id}")
+
+    async def get_messages(self, peer: Any, ids: int | list[int]) -> Any:
+        if isinstance(ids, list):
+            return [self._message(i) for i in ids]
+        return self._message(ids)
 
 
 @pytest.fixture

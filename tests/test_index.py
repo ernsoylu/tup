@@ -124,3 +124,32 @@ def test_index_ignores_foreign_chats_and_captionless(
     assert result.exit_code == 0, result.output
     assert "0 row(s) reconstructed" in result.output
     assert read_sync_state() == 801
+
+
+def test_index_prune_removes_rows_for_deleted_messages(
+    fake_env: str, telegram_api: respx.MockRouter, mock_mtproto: object
+) -> None:
+    from tests.conftest import FakeMtprotoClient
+
+    assert isinstance(mock_mtproto, FakeMtprotoClient)
+    seed_file("/docs/", "kept.pdf", 11)
+    seed_file("/docs/", "deleted.pdf", 12)
+    seed_file("/other/", "also-deleted.pdf", 13)
+    mock_mtproto.existing_ids = {11}  # only message 11 survives on Telegram
+
+    result = runner.invoke(app, ["index", CHAT_ID, "--prune"])
+    assert result.exit_code == 0, result.output
+    assert "2 stale row(s) pruned" in result.output
+    assert read_vfs("/docs/", "kept.pdf") is not None
+    assert read_vfs("/docs/", "deleted.pdf") is None
+    assert read_vfs("/other/", "also-deleted.pdf") is None
+
+
+def test_index_prune_keeps_everything_when_nothing_deleted(
+    fake_env: str, telegram_api: respx.MockRouter, mock_mtproto: object
+) -> None:
+    seed_file("/docs/", "a.pdf", 11)
+    result = runner.invoke(app, ["index", CHAT_ID, "--prune"])
+    assert result.exit_code == 0, result.output
+    assert "0 stale row(s) pruned" in result.output
+    assert read_vfs("/docs/", "a.pdf") is not None

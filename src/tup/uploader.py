@@ -451,3 +451,28 @@ async def copy_message_media(
         return int(message.id)
 
     return await _mtproto_with_retry(_copy, max_retries=max_retries, what="copy")
+
+
+async def fetch_existing_ids(
+    client: TelegramClient, chat_id: str, message_ids: list[int], *, max_retries: int
+) -> set[int]:
+    """IDs from message_ids that still exist on Telegram (deleted ones vanish).
+
+    The Bot API emits no deletion events, so this MTProto existence sweep is
+    the only way to detect messages removed natively in Telegram.
+    """
+    peer = await resolve_peer(client, chat_id)
+    found: set[int] = set()
+    for start in range(0, len(message_ids), 100):
+        chunk = message_ids[start : start + 100]
+
+        async def _fetch(batch: list[int] = chunk) -> Any:
+            return await client.get_messages(peer, ids=batch)
+
+        messages = await _mtproto_with_retry(
+            _fetch, max_retries=max_retries, what="verify messages"
+        )
+        for message in messages:
+            if message is not None:
+                found.add(int(message.id))
+    return found

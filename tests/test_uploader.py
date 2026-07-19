@@ -254,7 +254,7 @@ async def test_copy_message_media_reuses_media(settings: Settings) -> None:
 
 
 class _NoMediaClient(FakeMtprotoClient):
-    async def get_messages(self, peer: Any, ids: int) -> Any:
+    async def get_messages(self, peer: Any, ids: int | list[int]) -> Any:
         return None
 
 
