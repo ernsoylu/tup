@@ -14,6 +14,7 @@ from telethon import TelegramClient
 from tup.config import Settings
 from tup.database import Database, VfsEntry
 from tup.uploader import (
+    DuplicateFileError,
     TupError,
     access_error,
     bot_session,
@@ -100,13 +101,33 @@ async def op_cp(
     dest = normalize_vfs_path(dest_dir, directory=True)
     if await db.vfs_get(chat_id, dest, entry.file_name) is not None:
         raise TupError(f"Destination already exists: {dest}{entry.file_name}")
+    same_hash = [
+        e for e in await db.vfs_find_by_hash(chat_id, entry.file_hash) if e.virtual_path == dest
+    ]
+    if same_hash:
+        raise DuplicateFileError(
+            f"An identical file already exists in {dest} "
+            f"as {same_hash[0].file_name} (same SHA-256)."
+        )
     full_path = _full_path(dest, entry.file_name)
     caption = format_caption(full_path, entry.file_hash)
     message_id = await copy_message_media(
         client, chat_id, entry.telegram_message_id, caption, max_retries=settings.max_retries
     )
     await db.vfs_upsert(
-        chat_id, dest, entry.file_name, entry.file_size, entry.file_hash, "", message_id
+        chat_id,
+        dest,
+        entry.file_name,
+        entry.file_size,
+        entry.file_hash,
+        "",
+        message_id,
+        mime_type=entry.mime_type,
+        media_kind=entry.media_kind,
+        width=entry.width,
+        height=entry.height,
+        duration=entry.duration,
+        source_mtime=entry.source_mtime,
     )
     return full_path
 

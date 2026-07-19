@@ -123,7 +123,7 @@ class TransfersPanel(QWidget):
         if transfer.state == "cancelled":
             return "Stopped"
         if transfer.state == "skipped":
-            return "Skipped"
+            return f"Skipped — {transfer.error}" if transfer.error else "Skipped"
         return "Queued"
 
     def _update_speed(self, transfer: Transfer) -> float:

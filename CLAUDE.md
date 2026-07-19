@@ -57,14 +57,15 @@ class Settings(BaseSettings):
     telegram_api_base_url: Optional[HttpUrl] = Field(None, description="Local Bot API URL for 2GB limits")
     max_retries: int = Field(3, ge=1, le=10)
     request_timeout: int = Field(120, ge=10, le=3600)
-    database_path: Path = Field(default_factory=lambda: Path("~/.config/tup/registry.db").expanduser())
+    database_path: Path = Field(default_factory=lambda: Path("~/.tui/registry.db").expanduser())
     log_level: str = Field("INFO", pattern="^(DEBUG|INFO|WARNING|ERROR)$")
 ```
 
 * **Security & Secret Scrubbing**:
 * Tokens MUST NEVER be printed in raw form. In CLI outputs, mask using `token.get_secret_value()[:4] + "..." + token.get_secret_value()[-4:]`.
 * Implement a `SecretScrubberFormatter` for Python `logging` that intercepts all log strings and regex-replaces any string matching `TELEGRAM_BOT_TOKEN` or `bot<token>` URLs with `[SCRUBBED_TOKEN]`.
-* Ensure `~/.config/tup/registry.db` also receives `0600` permissions upon initial creation.
+* Ensure `~/.tui/registry.db` also receives `0600` permissions upon initial creation.
+* **Home Directory (`~/.tui`)**: `.env`, `registry.db`, `tup.log`, the MTProto session file, and the GUI's per-drive download cache (`~/.tui/<chat_id>/<vfs folders>/<file>`) all live in the hidden `~/.tui` directory (override: `TUP_CONFIG_DIR`; cache-only override: `TUP_CACHE_DIR`). On startup, `migrate_legacy_config()` moves any pre-0.3 files from `~/.config/tup` into `~/.tui` exactly once, never overwriting existing destinations.
 
 ## 4. PTB Lifecycle & Telegram Edge Cases
 
@@ -86,6 +87,7 @@ async with app:
 * **VFS Path Rule**: All paths MUST be root-relative POSIX paths starting with `/` (e.g., `/docs/file.pdf`). Uploading a local folder `/home/user/code` mounts at root: `/code/`.
 * **Media Routing & MIME Fallback**: Use `filetype.guess()` to inspect magic bytes and route via `send_photo`, `send_video`, `send_audio`, or `send_document`. Because `filetype` is unmaintained (last release 2023) and may miss newer formats or extension-only definitions, implement a mandatory fallback to Python's built-in `mimetypes.guess_type(file_path)` when `filetype.guess()` returns `None`. Allow CLI override flags (`--as-doc`, `--as-video`, `--as-audio`).
 * **Upload Transport (MTProto)**: All uploads and server-side copies run over MTProto via `telethon` (bot-token login; requires `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` from my.telegram.org). Uniform 2 GB cap — abort with a `Rich` error above 2 GB. The Bot API (PTB) is retained only for metadata operations: chat validation, `edit_message_caption`, `delete_message`, and `getUpdates` draining. MTProto message IDs are chat-scoped and shared with the Bot API, so mv/rm interoperate; MTProto responses carry no Bot API `file_id` (store `""` in `vfs_index`), and `cp` re-sends the source message's media object instead.
+* **Same-Folder Deduplication**: Two files with the same SHA-256 MUST NOT coexist in one virtual directory. `up` and `cp` check `vfs_index` by hash before any network work and raise `DuplicateFileError` (a `TupError` subclass) — it is a *skip*, not a failure: nothing is written to `failed_registry`, `sync` counts it as unchanged, and the GUI transfer queue marks the item "skipped".
 * **VFS Caption Protocol**: Every uploaded file MUST append this exact metadata block:
 ```text
 📁 `/virtual/path/file_name.ext`
@@ -127,6 +129,13 @@ CREATE TABLE IF NOT EXISTS vfs_index (
     telegram_file_id TEXT NOT NULL,
     telegram_message_id INTEGER NOT NULL,
     upload_timestamp TEXT NOT NULL,
+    -- v2 file attributes (added by migrate_v1_to_v2 via ALTER TABLE; defaults keep v1 rows valid)
+    mime_type TEXT NOT NULL DEFAULT '',
+    media_kind TEXT NOT NULL DEFAULT '',  -- document | photo | video | audio ('' for .keep rows)
+    width INTEGER,                        -- pixels (photo/video)
+    height INTEGER,
+    duration INTEGER,                     -- seconds (video/audio)
+    source_mtime TEXT NOT NULL DEFAULT '',-- ISO 8601 mtime of the uploaded local file
     UNIQUE(chat_id, virtual_path, file_name)
 );
 

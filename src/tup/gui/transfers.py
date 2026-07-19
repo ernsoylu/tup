@@ -13,6 +13,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
+from tup.uploader import DuplicateFileError
+
 TransferKind = Literal["upload", "download"]
 TransferState = Literal["queued", "running", "done", "failed", "cancelled", "skipped"]
 
@@ -156,6 +158,10 @@ class TransferManager:
                     await task
                     transfer.done = transfer.total
                     self._set_state(transfer, "done")
+                except DuplicateFileError as exc:
+                    # Identical content already in the folder — a skip, not a failure.
+                    transfer.error = str(exc)
+                    self._set_state(transfer, "skipped")
                 except asyncio.CancelledError:
                     if transfer.state not in ("cancelled", "skipped"):
                         transfer.state = "cancelled"

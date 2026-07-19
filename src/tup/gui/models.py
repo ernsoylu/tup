@@ -24,7 +24,17 @@ __all__ = [
     "human_size",
 ]
 
-COLUMNS = ("Name", "Size", "Kind", "Modified", "Status")
+COLUMNS = ("Name", "Size", "Kind", "Dimensions", "Duration", "Modified", "Status")
+
+
+def format_duration(seconds: int | None) -> str:
+    if seconds is None:
+        return ""
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
 
 
 @dataclass
@@ -89,6 +99,13 @@ class FileRow:
     modified: str  # ISO prefix 'YYYY-MM-DD HH:MM:SS' (sortable), '' for folders
     entry: VfsEntry | None = None
     downloaded: bool = False
+    width: int | None = None
+    height: int | None = None
+    duration: int | None = None
+
+    @property
+    def pixels(self) -> int:
+        return (self.width or 0) * (self.height or 0)
 
 
 def build_rows(
@@ -109,15 +126,20 @@ def build_rows(
             continue
         if not show_hidden and entry.file_name.startswith("."):
             continue
+        kind = entry.media_kind.capitalize() if entry.media_kind else kind_label(entry.file_name)
+        modified = entry.source_mtime or entry.upload_timestamp
         rows.append(
             FileRow(
                 name=entry.file_name,
                 is_dir=False,
                 size=entry.file_size,
-                kind=kind_label(entry.file_name),
-                modified=entry.upload_timestamp[:19].replace("T", " "),
+                kind=kind,
+                modified=modified[:19].replace("T", " "),
                 entry=entry,
                 downloaded=bool(is_downloaded and is_downloaded(entry)),
+                width=entry.width,
+                height=entry.height,
+                duration=entry.duration,
             )
         )
     return rows
@@ -178,8 +200,12 @@ class FileTableModel(QAbstractTableModel):
             if column == 2:
                 return row.kind
             if column == 3:
-                return row.modified
+                return f"{row.width}×{row.height}" if row.width and row.height else ""
             if column == 4:
+                return format_duration(row.duration)
+            if column == 5:
+                return row.modified
+            if column == 6:
                 return "✓ Downloaded" if row.downloaded else ""
         if role == Qt.ItemDataRole.DecorationRole and column == 0:
             return self._folder_icon if row.is_dir else self._file_icon
@@ -212,8 +238,12 @@ class FileSortProxy(QSortFilterProxyModel):
             return a.size < b.size
         if column == 2 and a.kind.lower() != b.kind.lower():
             return a.kind.lower() < b.kind.lower()
-        if column == 3 and a.modified != b.modified:
+        if column == 3 and a.pixels != b.pixels:
+            return a.pixels < b.pixels
+        if column == 4 and (a.duration or 0) != (b.duration or 0):
+            return (a.duration or 0) < (b.duration or 0)
+        if column == 5 and a.modified != b.modified:
             return a.modified < b.modified
-        if column == 4 and a.downloaded != b.downloaded:
+        if column == 6 and a.downloaded != b.downloaded:
             return b.downloaded
         return a.name.lower() < b.name.lower()

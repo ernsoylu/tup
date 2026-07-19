@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 from pathlib import Path
 
@@ -11,17 +12,47 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 SECURE_MODE = 0o600
 
+# Files tup keeps in its home directory (secrets, index, logs, MTProto auth).
+_HOME_FILES = (".env", "registry.db", "tup.log", "tup-mtproto.session")
+
 
 class SetupRequiredError(RuntimeError):
     """Raised when no valid configuration exists; the CLI should run `tup setup`."""
 
 
 def config_dir() -> Path:
-    """Per-user config directory; overridable via TUP_CONFIG_DIR (used by tests)."""
+    """tup's home directory (~/.tui): .env, registry.db, logs, session, and the
+    per-drive download cache all live here. Overridable via TUP_CONFIG_DIR."""
     override = os.environ.get("TUP_CONFIG_DIR")
     if override:
         return Path(override).expanduser()
-    return Path("~/.config/tup").expanduser()
+    return Path("~/.tui").expanduser()
+
+
+def migrate_legacy_config(legacy: Path | None = None, target: Path | None = None) -> list[str]:
+    """One-time move of pre-0.3 files from ~/.config/tup into ~/.tui.
+
+    Only moves files that don't already exist at the destination; returns the
+    names moved. A no-op once the migration has happened (or when the config
+    dir is overridden without explicit paths, as in tests).
+    """
+    if legacy is None:
+        legacy = Path("~/.config/tup").expanduser()
+        if os.environ.get("TUP_CONFIG_DIR"):
+            return []
+    if target is None:
+        target = config_dir()
+    if not legacy.is_dir() or legacy == target:
+        return []
+    moved: list[str] = []
+    for name in _HOME_FILES:
+        source = legacy / name
+        destination = target / name
+        if source.is_file() and not destination.exists():
+            target.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(destination))
+            moved.append(name)
+    return moved
 
 
 def env_file_path() -> Path:

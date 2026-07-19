@@ -18,8 +18,9 @@ def run_gui() -> None:
         raise SystemExit(1) from None
 
     from tup.cli import setup_logging
-    from tup.config import Settings, SetupRequiredError
+    from tup.config import Settings, SetupRequiredError, migrate_legacy_config
 
+    migrate_legacy_config()
     setup_logging()
     app = QApplication(sys.argv)
     app.setApplicationName("tup")

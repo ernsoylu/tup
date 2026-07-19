@@ -15,7 +15,7 @@ import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +50,14 @@ class TupError(RuntimeError):
     def __init__(self, message: str, hint: str | None = None) -> None:
         super().__init__(message)
         self.hint = hint
+
+
+class DuplicateFileError(TupError):
+    """An identical file (same SHA-256) already exists in the target folder.
+
+    Not a failure: nothing is written to failed_registry, sync counts it as
+    skipped, and the GUI transfer queue marks the item skipped.
+    """
 
 
 @dataclass(frozen=True)
@@ -226,7 +234,7 @@ async def connect_mtproto(settings: Settings) -> TelegramClient:
         raise TupError(
             "Uploads require MTProto credentials (TELEGRAM_API_ID / TELEGRAM_API_HASH).",
             hint="Create them in seconds at https://my.telegram.org → API development "
-            "tools, then run [bold]tup setup[/bold] or add them to ~/.config/tup/.env.",
+            "tools, then run [bold]tup setup[/bold] or add them to ~/.tui/.env.",
         )
     session_path = config_dir() / "tup-mtproto"
     client = TelegramClient(
@@ -299,10 +307,37 @@ def resolve_kind(
     return mime, kind
 
 
-def _stat_upload_size(local_path: Path) -> int:
+def _stat_upload(local_path: Path) -> tuple[int, str]:
+    """(size, ISO mtime) of the local file to upload."""
     if not local_path.is_file():
         raise TupError(f"Not a file: {local_path}")
-    return local_path.stat().st_size
+    stat = local_path.stat()
+    mtime = datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat()
+    return stat.st_size, mtime
+
+
+def extract_media_metadata(path: Path) -> tuple[int | None, int | None, int | None]:
+    """(width, height, duration seconds) via hachoir; Nones when unavailable."""
+    try:
+        from hachoir.metadata import extractMetadata
+        from hachoir.parser import createParser
+
+        parser = createParser(str(path))
+        if parser is None:
+            return None, None, None
+        with parser:
+            metadata = extractMetadata(parser)
+        if metadata is None:
+            return None, None, None
+        width = int(metadata.get("width")) if metadata.has("width") else None
+        height = int(metadata.get("height")) if metadata.has("height") else None
+        duration = (
+            int(metadata.get("duration").total_seconds()) if metadata.has("duration") else None
+        )
+        return width, height, duration
+    except Exception:
+        logger.warning("Could not extract media metadata from %s", path)
+        return None, None, None
 
 
 def video_attributes(path: Path) -> list[DocumentAttributeVideo] | None:
@@ -312,31 +347,17 @@ def video_attributes(path: Path) -> list[DocumentAttributeVideo] | None:
     size and the video shows with wrong dimensions. Returns None when the
     container can't be parsed — Telethon then falls back to its own defaults.
     """
-    try:
-        from hachoir.metadata import extractMetadata
-        from hachoir.parser import createParser
-
-        parser = createParser(str(path))
-        if parser is None:
-            return None
-        with parser:
-            metadata = extractMetadata(parser)
-        if metadata is None or not (metadata.has("width") and metadata.has("height")):
-            return None
-        duration = 0
-        if metadata.has("duration"):
-            duration = int(metadata.get("duration").total_seconds())
-        return [
-            DocumentAttributeVideo(
-                duration=duration,
-                w=int(metadata.get("width")),
-                h=int(metadata.get("height")),
-                supports_streaming=True,
-            )
-        ]
-    except Exception:
-        logger.warning("Could not extract video metadata from %s; using defaults", path)
+    width, height, duration = extract_media_metadata(path)
+    if width is None or height is None:
         return None
+    return [
+        DocumentAttributeVideo(
+            duration=duration or 0,
+            w=width,
+            h=height,
+            supports_streaming=True,
+        )
+    ]
 
 
 async def _mtproto_with_retry[T](
@@ -394,16 +415,31 @@ async def upload_file(
     `progress_callback` is given (e.g. by the GUI transfer queue) it replaces
     the rich terminal progress bar.
     """
-    size = _stat_upload_size(local_path)
+    size, source_mtime = _stat_upload(local_path)
     check_size_limit(local_path, size)
 
     virtual_dir = normalize_vfs_path(dest_dir, directory=True)
     full_path = virtual_dir + local_path.name if virtual_dir != "/" else "/" + local_path.name
     file_hash = sha256_file(local_path)
     caption = format_caption(full_path, file_hash, user_caption)
-    _mime, kind = resolve_kind(local_path, as_doc=as_doc, as_video=as_video, as_audio=as_audio)
+    mime, kind = resolve_kind(local_path, as_doc=as_doc, as_video=as_video, as_audio=as_audio)
+
+    # Same-SHA files must not coexist within one folder (spec §5): checked
+    # before any network work, and deliberately not recorded as a failure.
+    same_hash_here = [
+        e for e in await db.vfs_find_by_hash(chat_id, file_hash) if e.virtual_path == virtual_dir
+    ]
+    if same_hash_here:
+        raise DuplicateFileError(
+            f"{local_path.name} is identical (SHA-256) to "
+            f"{virtual_dir}{same_hash_here[0].file_name} — not uploading a duplicate.",
+            hint="Delete the existing file first, or upload to a different folder.",
+        )
 
     attributes = video_attributes(local_path) if kind == "video" else None
+    width = height = duration = None
+    if kind in ("photo", "video", "audio"):
+        width, height, duration = extract_media_metadata(local_path)
 
     async def _send() -> int:
         peer = await resolve_peer(client, chat_id)
@@ -445,7 +481,21 @@ async def upload_file(
         await db.log_upload(str(local_path), size, chat_id, kind, "failed", error_message=str(exc))
         raise TupError(f"Upload of {local_path.name} failed: {exc}") from exc
 
-    await db.vfs_upsert(chat_id, virtual_dir, local_path.name, size, file_hash, "", message_id)
+    await db.vfs_upsert(
+        chat_id,
+        virtual_dir,
+        local_path.name,
+        size,
+        file_hash,
+        "",
+        message_id,
+        mime_type=mime,
+        media_kind=kind,
+        width=width,
+        height=height,
+        duration=duration,
+        source_mtime=source_mtime,
+    )
     await db.log_upload(
         str(local_path), size, chat_id, kind, "success", telegram_message_id=message_id
     )

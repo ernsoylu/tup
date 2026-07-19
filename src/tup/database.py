@@ -75,7 +75,19 @@ CREATE INDEX IF NOT EXISTS idx_failed_status ON failed_registry(status) WHERE st
 CREATE INDEX IF NOT EXISTS idx_logs_chat_time ON uploads_log(chat_id, timestamp DESC);
 """
 
-SCHEMA_VERSION = 1
+# v2: file attributes for the GUI — MIME, media kind, dimensions, duration,
+# and the source file's modification time. Nullable/defaulted so v1 rows and
+# .keep entries stay valid.
+_MIGRATION_V2_SQL = """
+ALTER TABLE vfs_index ADD COLUMN mime_type TEXT NOT NULL DEFAULT '';
+ALTER TABLE vfs_index ADD COLUMN media_kind TEXT NOT NULL DEFAULT '';
+ALTER TABLE vfs_index ADD COLUMN width INTEGER;
+ALTER TABLE vfs_index ADD COLUMN height INTEGER;
+ALTER TABLE vfs_index ADD COLUMN duration INTEGER;
+ALTER TABLE vfs_index ADD COLUMN source_mtime TEXT NOT NULL DEFAULT '';
+"""
+
+SCHEMA_VERSION = 2
 
 
 class DatabaseError(RuntimeError):
@@ -101,6 +113,12 @@ class VfsEntry:
     telegram_file_id: str
     telegram_message_id: int
     upload_timestamp: str
+    mime_type: str = ""
+    media_kind: str = ""  # document | photo | video | audio ('' for .keep rows)
+    width: int | None = None
+    height: int | None = None
+    duration: int | None = None  # seconds
+    source_mtime: str = ""  # ISO 8601 mtime of the uploaded local file
 
 
 @dataclass(frozen=True)
@@ -191,7 +209,12 @@ class Database:
                 "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
                 (1, utc_now_iso()),
             )
-        # Future migrations: run migrate_v1_to_v2() etc. sequentially, each in a transaction.
+        if current < 2:
+            await conn.executescript(_MIGRATION_V2_SQL)
+            await conn.execute(
+                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                (2, utc_now_iso()),
+            )
         await conn.commit()
 
     # --- chat aliases ---------------------------------------------------------
@@ -237,19 +260,33 @@ class Database:
         file_hash: str,
         telegram_file_id: str,
         telegram_message_id: int,
+        *,
+        mime_type: str = "",
+        media_kind: str = "",
+        width: int | None = None,
+        height: int | None = None,
+        duration: int | None = None,
+        source_mtime: str = "",
     ) -> None:
         await self.conn.execute(
             """
             INSERT INTO vfs_index
                 (chat_id, virtual_path, file_name, file_size, file_hash,
-                 telegram_file_id, telegram_message_id, upload_timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 telegram_file_id, telegram_message_id, upload_timestamp,
+                 mime_type, media_kind, width, height, duration, source_mtime)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(chat_id, virtual_path, file_name) DO UPDATE SET
                 file_size = excluded.file_size,
                 file_hash = excluded.file_hash,
                 telegram_file_id = excluded.telegram_file_id,
                 telegram_message_id = excluded.telegram_message_id,
-                upload_timestamp = excluded.upload_timestamp
+                upload_timestamp = excluded.upload_timestamp,
+                mime_type = excluded.mime_type,
+                media_kind = excluded.media_kind,
+                width = excluded.width,
+                height = excluded.height,
+                duration = excluded.duration,
+                source_mtime = excluded.source_mtime
             """,
             (
                 chat_id,
@@ -260,6 +297,12 @@ class Database:
                 telegram_file_id,
                 telegram_message_id,
                 utc_now_iso(),
+                mime_type,
+                media_kind,
+                width,
+                height,
+                duration,
+                source_mtime,
             ),
         )
         await self.conn.commit()

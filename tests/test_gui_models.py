@@ -33,6 +33,7 @@ def entry(
     name: str,
     size: int = 10,
     ts: str = "2026-07-19T10:00:00+00:00",
+    **extra: object,
 ) -> VfsEntry:
     return VfsEntry(
         id=1,
@@ -44,6 +45,7 @@ def entry(
         telegram_file_id="",
         telegram_message_id=1,
         upload_timestamp=ts,
+        **extra,  # type: ignore[arg-type]
     )
 
 
@@ -119,6 +121,42 @@ def test_sort_proxy_keeps_folders_first_both_orders(qapp: QApplication) -> None:
     proxy.sort(1, Qt.SortOrder.DescendingOrder)
     names = [proxy.row_at(i).name for i in range(proxy.rowCount())]
     assert names == ["sub", "aaa.txt", "zzz.txt"]
+
+
+def test_media_attribute_columns_display_and_sort(qapp: QApplication) -> None:
+    from tup.gui.models import format_duration
+
+    assert format_duration(159) == "2:39"
+    assert format_duration(3723) == "1:02:03"
+    assert format_duration(None) == ""
+
+    model = FileTableModel()
+    entries = [
+        entry(
+            "/",
+            "tall.mp4",
+            media_kind="video",
+            mime_type="video/mp4",
+            width=1080,
+            height=1920,
+            duration=159,
+            source_mtime="2026-07-01T09:30:00+00:00",
+        ),
+        entry("/", "small.jpg", media_kind="photo", width=100, height=100),
+    ]
+    model.set_rows(build_rows(entries, "/"))
+    proxy = FileSortProxy(model)
+
+    tall = next(i for i in range(model.rowCount()) if model.row_at(i).name == "tall.mp4")
+    assert model.data(model.index(tall, 2)) == "Video"
+    assert model.data(model.index(tall, 3)) == "1080×1920"
+    assert model.data(model.index(tall, 4)) == "2:39"
+    assert model.data(model.index(tall, 5)) == "2026-07-01 09:30:00"  # source mtime wins
+
+    proxy.sort(3, Qt.SortOrder.DescendingOrder)  # by pixel count
+    assert proxy.row_at(0).name == "tall.mp4"
+    proxy.sort(4, Qt.SortOrder.AscendingOrder)  # by duration (None → 0 first)
+    assert proxy.row_at(0).name == "small.jpg"
 
 
 def test_sort_proxy_name_filter(qapp: QApplication) -> None:

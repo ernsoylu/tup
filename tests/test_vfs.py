@@ -22,8 +22,10 @@ def seed(entries: list[tuple[str, str, str, int]]) -> None:
     async def _seed() -> None:
         async with Database(default_database_path()) as db:
             for virtual_path, file_name, file_id, message_id in entries:
+                # Distinct per-file hashes: same-SHA files may not share a folder.
+                file_hash = format(message_id, "x").zfill(64)
                 await db.vfs_upsert(
-                    CHAT_ID, virtual_path, file_name, 11, "h" * 64, file_id, message_id
+                    CHAT_ID, virtual_path, file_name, 11, file_hash, file_id, message_id
                 )
 
     asyncio.run(_seed())

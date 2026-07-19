@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from tup.database import Database, DatabaseError
+from tup.database import SCHEMA_VERSION, Database, DatabaseError
 
 
 @pytest_asyncio.fixture
@@ -21,14 +21,14 @@ async def db() -> AsyncIterator[Database]:
 async def test_migration_creates_schema_version(db: Database) -> None:
     async with db.conn.execute("SELECT MAX(version) AS v FROM schema_version") as cur:
         row = await cur.fetchone()
-    assert row is not None and row["v"] == 1
+    assert row is not None and row["v"] == SCHEMA_VERSION
 
 
 async def test_migration_is_idempotent(db: Database) -> None:
     await db._migrate()  # second run must be a no-op
     async with db.conn.execute("SELECT COUNT(*) AS c FROM schema_version") as cur:
         row = await cur.fetchone()
-    assert row is not None and row["c"] == 1
+    assert row is not None and row["c"] == SCHEMA_VERSION  # one row per applied version
 
 
 async def test_file_database_gets_0600(tmp_path: Path) -> None:

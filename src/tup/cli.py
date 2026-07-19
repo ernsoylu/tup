@@ -19,10 +19,11 @@ from typer._click.exceptions import UsageError
 from typer.core import TyperGroup
 
 from tup import __version__
-from tup.config import Settings, SetupRequiredError, log_file_path
+from tup.config import Settings, SetupRequiredError, log_file_path, migrate_legacy_config
 from tup.database import Database, DatabaseError, VfsEntry
 from tup.progress import console, error_console
 from tup.uploader import (
+    DuplicateFileError,
     TupError,
     access_error,
     bot_session,
@@ -51,7 +52,7 @@ state: dict[str, bool] = {"debug": False}
 
 
 def setup_logging(level: str = "INFO") -> None:
-    """Rich stderr logging plus scrubbed JSON-lines at ~/.config/tup/tup.log."""
+    """Rich stderr logging plus scrubbed JSON-lines at ~/.tui/tup.log."""
     root = logging.getLogger("tup")
     root.setLevel(level)
     root.handlers.clear()
@@ -140,7 +141,12 @@ def main(
     debug: Annotated[bool, typer.Option("--debug", help="Show full tracebacks on errors.")] = False,
 ) -> None:
     state["debug"] = debug
+    moved = migrate_legacy_config()
     setup_logging("DEBUG" if debug else "INFO")
+    if moved:
+        error_console.print(
+            f"📦 Moved {', '.join(moved)} from ~/.config/tup to ~/.tui (tup's new home)."
+        )
 
 
 # --- setup --------------------------------------------------------------------
@@ -524,6 +530,16 @@ def cp(
             dest_dir = _dest_directory(dest, entry.file_name)
             if await db.vfs_get(chat_id, dest_dir, entry.file_name) is not None:
                 raise TupError(f"Destination already exists: {dest_dir}{entry.file_name}")
+            same_hash = [
+                e
+                for e in await db.vfs_find_by_hash(chat_id, entry.file_hash)
+                if e.virtual_path == dest_dir
+            ]
+            if same_hash:
+                raise DuplicateFileError(
+                    f"An identical file already exists in {dest_dir} "
+                    f"as {same_hash[0].file_name} (same SHA-256)."
+                )
             full_path = dest_dir + entry.file_name if dest_dir != "/" else "/" + entry.file_name
             caption = format_caption(full_path, entry.file_hash)
             async with mtproto_session(settings) as client:
@@ -674,6 +690,8 @@ def sync(
                         await upload_file(db, settings, client, file_path, chat_id, dest_dir)
                         uploaded += 1
                         console.print(f"⬆️  {file_path.name} → {dest_dir}")
+                    except DuplicateFileError:
+                        skipped += 1  # identical content already in that folder
                     except TupError as exc:
                         failed += 1
                         fail(f"{file_path}: {exc}", exc.hint)
