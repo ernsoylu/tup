@@ -327,3 +327,17 @@ async def upload_file(
         "Uploaded %s -> chat %s as %s (message %d)", local_path, chat_id, kind, message.message_id
     )
     return message
+
+
+def media_info(message: Message) -> tuple[str, int] | None:
+    """(file_id, file_size) of a message's media asset, if any."""
+    if message.document:
+        return message.document.file_id, message.document.file_size or 0
+    if message.photo:
+        photo = message.photo[-1]
+        return photo.file_id, photo.file_size or 0
+    if message.video:
+        return message.video.file_id, message.video.file_size or 0
+    if message.audio:
+        return message.audio.file_id, message.audio.file_size or 0
+    return None

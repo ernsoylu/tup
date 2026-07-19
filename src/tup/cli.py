@@ -30,9 +30,17 @@ from tup.uploader import (
     edit_caption,
     extract_file_id,
     format_caption,
+    media_info,
+    parse_caption,
     upload_file,
 )
-from tup.utils import SecretScrubberFormatter, VfsPathError, normalize_vfs_path, split_vfs_path
+from tup.utils import (
+    SecretScrubberFormatter,
+    VfsPathError,
+    normalize_vfs_path,
+    sha256_file,
+    split_vfs_path,
+)
 
 KEEP_FILE = ".keep"
 
@@ -589,5 +597,266 @@ def rm(
                 )
             await db.vfs_delete(entry.id)
         console.print(f"✅ Deleted {entry.virtual_path}{entry.file_name}")
+
+    run_async(_run())
+
+
+# --- sync & reconciliation ----------------------------------------------------
+
+
+def _collect_sync_targets(local_dir: Path, remote_base: str) -> list[tuple[Path, str]]:
+    """S3-style: the *contents* of local_dir map into remote_base."""
+    targets = []
+    for file_path in sorted(local_dir.rglob("*")):
+        if not file_path.is_file():
+            continue
+        rel = file_path.parent.relative_to(local_dir).as_posix()
+        dest = (
+            remote_base
+            if rel == "."
+            else normalize_vfs_path(f"{remote_base}/{rel}", directory=True)
+        )
+        targets.append((file_path, dest))
+    return targets
+
+
+def _hash_local(file_path: Path) -> str:
+    return sha256_file(file_path)
+
+
+@app.command(context_settings=NEGATIVE_ID_OK)
+def sync(
+    local_dir: Annotated[str, typer.Argument(help="Local directory to sync from.")],
+    drive: Annotated[str, typer.Argument(help="Drive alias or chat_id.")],
+    remote_path: Annotated[str, typer.Argument(help="Destination VFS directory.")] = "/",
+) -> None:
+    """S3-style sync: upload directory contents, skipping unchanged files (SHA-256 match)."""
+
+    async def _run() -> None:
+        settings = Settings.load()
+        local = _resolve_local(local_dir)
+        if not local.is_dir():
+            raise TupError(f"Not a directory: {local_dir}")
+        remote_base = normalize_vfs_path(remote_path, directory=True)
+        targets = _collect_sync_targets(local, remote_base)
+        if not targets:
+            raise TupError(f"Directory is empty: {local_dir}")
+
+        uploaded = skipped = failed = 0
+        async with Database(settings.database_path) as db:
+            chat_id = await db.resolve_drive(drive)
+            async with bot_session(settings) as bot:
+                for file_path, dest_dir in targets:
+                    local_hash = _hash_local(file_path)
+                    existing = await db.vfs_get(chat_id, dest_dir, file_path.name)
+                    if existing is not None and existing.file_hash == local_hash:
+                        skipped += 1
+                        continue
+                    try:
+                        await upload_file(db, settings, bot, file_path, chat_id, dest_dir)
+                        uploaded += 1
+                        console.print(f"⬆️  {file_path.name} → {dest_dir}")
+                    except TupError as exc:
+                        failed += 1
+                        fail(f"{file_path}: {exc}", exc.hint)
+        console.print(
+            f"✅ Sync complete: {uploaded} uploaded, {skipped} unchanged, {failed} failed."
+        )
+        if failed:
+            raise TupError(
+                f"{failed} file(s) failed to sync.",
+                hint="See [bold]tup failed[/bold]; re-run with [bold]tup retry[/bold].",
+            )
+
+    run_async(_run())
+
+
+@app.command(context_settings=NEGATIVE_ID_OK)
+def index(
+    drive: Annotated[str, typer.Argument(help="Drive alias or chat_id.")],
+    reconstruct: Annotated[
+        bool,
+        typer.Option(
+            "--reconstruct", help="Also index tup-captioned messages missing from the DB."
+        ),
+    ] = False,
+) -> None:
+    """Reconcile the local index with pending Telegram updates.
+
+    Note: the Bot API has no message-history endpoint, so tup can only see
+    pending updates (getUpdates) and its own uploads. Caption edits made
+    natively in Telegram are applied to the index; with --reconstruct,
+    tup-captioned messages unknown to the DB are (re-)indexed.
+    """
+
+    async def _run() -> None:
+        settings = Settings.load()
+        edits = added = seen = 0
+        async with Database(settings.database_path) as db:
+            chat_id = await db.resolve_drive(drive)
+            last_update_id = await db.sync_state_get(chat_id)
+            async with bot_session(settings) as bot:
+                while True:
+                    updates = await bot.get_updates(
+                        offset=last_update_id + 1 if last_update_id else None,
+                        timeout=0,
+                        allowed_updates=[
+                            "message",
+                            "edited_message",
+                            "channel_post",
+                            "edited_channel_post",
+                        ],
+                    )
+                    if not updates:
+                        break
+                    for update in updates:
+                        last_update_id = max(last_update_id, update.update_id)
+                        message = update.effective_message
+                        if message is None or str(message.chat.id) != chat_id:
+                            continue
+                        seen += 1
+                        meta = parse_caption(message.caption)
+                        if meta is None:
+                            continue
+                        virtual_dir, file_name = split_vfs_path(meta.full_path)
+                        is_edit = (
+                            update.edited_message is not None
+                            or update.edited_channel_post is not None
+                        ) and message.edit_date is not None
+                        existing = await db.vfs_get_by_message(chat_id, message.message_id)
+                        if is_edit and existing is not None:
+                            if (
+                                existing.virtual_path != virtual_dir
+                                or existing.file_name != file_name
+                            ):
+                                await db.vfs_move(existing.id, virtual_dir, file_name)
+                                edits += 1
+                        elif existing is None and reconstruct:
+                            info = media_info(message)
+                            if info is None:
+                                continue
+                            file_id, file_size = info
+                            await db.vfs_upsert(
+                                chat_id,
+                                virtual_dir,
+                                file_name,
+                                file_size,
+                                meta.sha256,
+                                file_id,
+                                message.message_id,
+                            )
+                            added += 1
+            await db.sync_state_set(chat_id, last_update_id)
+        console.print(
+            f"✅ Index reconciled: {seen} message(s) seen, {edits} caption edit(s) applied, "
+            f"{added} row(s) reconstructed."
+        )
+
+    run_async(_run())
+
+
+# --- admin & retries ----------------------------------------------------------
+
+
+@app.command()
+def failed() -> None:
+    """List pending failed uploads."""
+
+    async def _run() -> None:
+        settings = Settings.load()
+        async with Database(settings.database_path) as db:
+            pending = await db.failed_pending()
+        table = Table("ID", "File", "Drive", "Retries", "Error", "When")
+        for item in pending:
+            table.add_row(
+                str(item.id),
+                item.file_path,
+                item.chat_id,
+                str(item.retry_count),
+                item.error_message,
+                item.timestamp,
+            )
+        console.print(table)
+        if not pending:
+            console.print("Nothing pending 🎉")
+
+    run_async(_run())
+
+
+@app.command()
+def retry(
+    failed_id: Annotated[
+        int | None, typer.Option("--id", help="Retry only this failed_registry row.")
+    ] = None,
+    abandon: Annotated[
+        bool, typer.Option("--abandon", help="Mark the selected item(s) abandoned instead.")
+    ] = False,
+) -> None:
+    """Re-attempt pending failed uploads (or abandon them with --abandon)."""
+
+    async def _run() -> None:
+        settings = Settings.load()
+        async with Database(settings.database_path) as db:
+            pending = await db.failed_pending(failed_id)
+            if not pending:
+                console.print("Nothing to retry 🎉")
+                return
+            if abandon:
+                for item in pending:
+                    await db.failed_mark(item.id, "abandoned")
+                console.print(f"✅ Abandoned {len(pending)} item(s).")
+                return
+            resolved = still_failing = 0
+            async with bot_session(settings) as bot:
+                for item in pending:
+                    file_path = Path(item.file_path)
+                    meta = parse_caption(item.caption)
+                    dest_dir = split_vfs_path(meta.full_path)[0] if meta is not None else "/"
+                    try:
+                        await upload_file(
+                            db,
+                            settings,
+                            bot,
+                            file_path,
+                            item.chat_id,
+                            dest_dir,
+                            user_caption=meta.user_caption if meta else None,
+                        )
+                        await db.failed_mark(item.id, "resolved", bump_retry=True)
+                        resolved += 1
+                        console.print(f"✅ Retried {file_path.name} → {dest_dir}")
+                    except TupError as exc:
+                        await db.failed_mark(item.id, "pending", bump_retry=True)
+                        still_failing += 1
+                        fail(f"{file_path}: {exc}", exc.hint)
+        console.print(f"Retry finished: {resolved} resolved, {still_failing} still pending.")
+
+    run_async(_run())
+
+
+@app.command()
+def logs(
+    limit: Annotated[int, typer.Option("--limit", help="Number of entries to show.")] = 20,
+    chat: Annotated[str | None, typer.Option("--chat", help="Filter by drive/chat_id.")] = None,
+) -> None:
+    """Show the most recent upload audit log entries."""
+
+    async def _run() -> None:
+        settings = Settings.load()
+        async with Database(settings.database_path) as db:
+            chat_id = await db.resolve_drive(chat) if chat else None
+            entries = await db.log_recent(limit=limit, chat_id=chat_id)
+        table = Table("When", "File", "Drive", "Type", "Status", "Msg ID", "Error")
+        for item in entries:
+            table.add_row(
+                item.timestamp,
+                item.file_path,
+                item.chat_id,
+                item.upload_type,
+                "[green]success[/green]" if item.status == "success" else "[red]failed[/red]",
+                str(item.telegram_message_id or "-"),
+                item.error_message or "-",
+            )
+        console.print(table)
 
     run_async(_run())

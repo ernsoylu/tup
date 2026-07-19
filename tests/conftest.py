@@ -25,6 +25,9 @@ def isolate_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     config_dir = tmp_path / "config"
     monkeypatch.setenv("TUP_CONFIG_DIR", str(config_dir))
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    # Wide console so rich tables don't truncate paths and messages don't wrap
+    # mid-word, which would break substring assertions.
+    monkeypatch.setenv("COLUMNS", "300")
     monkeypatch.chdir(tmp_path)
     return config_dir
 
@@ -61,12 +64,12 @@ def message_result(message_id: int = 101, **extra: Any) -> dict[str, Any]:
 def telegram_api() -> Iterator[respx.MockRouter]:
     """Intercept all Bot API HTTP calls; the live API is never reachable."""
     with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
-        router.post(url__regex=_BASE + "/getMe").mock(
+        router.post(url__regex=_BASE + "/getMe", name="getMe").mock(
             return_value=tg_json(
                 {"id": 42, "is_bot": True, "first_name": "tup", "username": "tup_bot"}
             )
         )
-        router.post(url__regex=_BASE + "/getChat").mock(
+        router.post(url__regex=_BASE + "/getChat", name="getChat").mock(
             return_value=tg_json(
                 {
                     "id": int(CHAT_ID),
@@ -77,14 +80,14 @@ def telegram_api() -> Iterator[respx.MockRouter]:
                 }
             )
         )
-        router.post(url__regex=_BASE + "/sendDocument").mock(
+        router.post(url__regex=_BASE + "/sendDocument", name="sendDocument").mock(
             return_value=tg_json(
                 message_result(
                     document={"file_id": "fid-doc", "file_unique_id": "u1", "file_name": "a.bin"}
                 )
             )
         )
-        router.post(url__regex=_BASE + "/sendPhoto").mock(
+        router.post(url__regex=_BASE + "/sendPhoto", name="sendPhoto").mock(
             return_value=tg_json(
                 message_result(
                     photo=[
@@ -93,7 +96,7 @@ def telegram_api() -> Iterator[respx.MockRouter]:
                 )
             )
         )
-        router.post(url__regex=_BASE + "/sendVideo").mock(
+        router.post(url__regex=_BASE + "/sendVideo", name="sendVideo").mock(
             return_value=tg_json(
                 message_result(
                     video={
@@ -106,18 +109,22 @@ def telegram_api() -> Iterator[respx.MockRouter]:
                 )
             )
         )
-        router.post(url__regex=_BASE + "/sendAudio").mock(
+        router.post(url__regex=_BASE + "/sendAudio", name="sendAudio").mock(
             return_value=tg_json(
                 message_result(
                     audio={"file_id": "fid-audio", "file_unique_id": "u4", "duration": 1}
                 )
             )
         )
-        router.post(url__regex=_BASE + "/editMessageCaption").mock(
+        router.post(url__regex=_BASE + "/editMessageCaption", name="editMessageCaption").mock(
             return_value=tg_json(message_result())
         )
-        router.post(url__regex=_BASE + "/deleteMessage").mock(return_value=tg_json(True))
-        router.post(url__regex=_BASE + "/getUpdates").mock(return_value=tg_json([]))
+        router.post(url__regex=_BASE + "/deleteMessage", name="deleteMessage").mock(
+            return_value=tg_json(True)
+        )
+        router.post(url__regex=_BASE + "/getUpdates", name="getUpdates").mock(
+            return_value=tg_json([])
+        )
         yield router
 
 
