@@ -385,7 +385,7 @@ async def _mtproto_with_retry[T](
                 ) from exc
             logger.warning("Flood wait (%s): sleeping %ds", what, exc.seconds)
             await asyncio.sleep(float(exc.seconds))
-        except (ConnectionError, TimeoutError, OSError) as exc:
+        except OSError as exc:  # includes ConnectionError and TimeoutError
             attempt += 1
             if attempt > max_retries:
                 raise TupError(

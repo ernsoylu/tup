@@ -19,7 +19,7 @@ MediaKind = Literal["photo", "video", "audio", "document"]
 # Telegram bot tokens look like "123456789:AAE...35-char-secret" and may appear
 # bare, as env assignments, or embedded in api.telegram.org/bot<token>/ URLs —
 # no leading \b: "bot<digits>" has no word boundary before the digits.
-_TOKEN_RE = re.compile(r"\d{5,}:[A-Za-z0-9_-]{30,}")
+_TOKEN_RE = re.compile(r"\d{5,12}:[A-Za-z0-9_-]{30,64}")  # bounded: linear-time matching
 
 HASH_CHUNK_SIZE = 1024 * 1024
 

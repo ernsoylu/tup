@@ -369,7 +369,9 @@ def _dest_directory(dest: str, src_name: str) -> str:
         return "/"
     parent, base = as_file.rsplit("/", 1)
     if base == src_name:
-        return (parent or "/") if parent.endswith("/") else parent + "/" if parent else "/"
+        if not parent:
+            return "/"
+        return parent if parent.endswith("/") else parent + "/"
     return normalize_vfs_path(dest, directory=True)
 
 
@@ -706,6 +708,107 @@ def sync(
     run_async(_run())
 
 
+async def _fetch_pending_updates(
+    bot: Bot, offset: int | None, max_retries: int
+) -> tuple[Update, ...]:
+    async def _fetch() -> tuple[Update, ...]:
+        return await bot.get_updates(
+            offset=offset,
+            timeout=0,
+            allowed_updates=[
+                "message",
+                "edited_message",
+                "channel_post",
+                "edited_channel_post",
+            ],
+        )
+
+    return await send_with_retry(_fetch, max_retries=max_retries, what="drain updates")
+
+
+async def _reconcile_update(
+    db: Database, chat_id: str, update: Update, *, reconstruct: bool
+) -> tuple[int, int, int]:
+    """Apply one pending update to the index; returns (seen, edits, added) deltas."""
+    message = update.effective_message
+    if message is None or str(message.chat.id) != chat_id:
+        return 0, 0, 0
+    meta = parse_caption(message.caption)
+    if meta is None:
+        return 1, 0, 0
+    virtual_dir, file_name = split_vfs_path(meta.full_path)
+    is_edit = (
+        update.edited_message is not None or update.edited_channel_post is not None
+    ) and message.edit_date is not None
+    existing = await db.vfs_get_by_message(chat_id, message.message_id)
+    if is_edit and existing is not None:
+        if existing.virtual_path != virtual_dir or existing.file_name != file_name:
+            await db.vfs_move(existing.id, virtual_dir, file_name)
+            return 1, 1, 0
+        return 1, 0, 0
+    if existing is None and reconstruct:
+        info = media_info(message)
+        if info is None:
+            return 1, 0, 0
+        file_id, file_size = info
+        await db.vfs_upsert(
+            chat_id, virtual_dir, file_name, file_size, meta.sha256, file_id, message.message_id
+        )
+        return 1, 0, 1
+    return 1, 0, 0
+
+
+async def _drain_updates(
+    db: Database, bot: Bot, chat_id: str, *, reconstruct: bool, max_retries: int
+) -> tuple[int, int, int]:
+    """Drain pending getUpdates for one chat; returns (seen, edits, added)."""
+    seen = edits = added = 0
+    last_update_id = await db.sync_state_get(chat_id)
+    while True:
+        offset = last_update_id + 1 if last_update_id else None
+        updates = await _fetch_pending_updates(bot, offset, max_retries)
+        if not updates:
+            break
+        for update in updates:
+            last_update_id = max(last_update_id, update.update_id)
+            new_seen, new_edits, new_added = await _reconcile_update(
+                db, chat_id, update, reconstruct=reconstruct
+            )
+            seen += new_seen
+            edits += new_edits
+            added += new_added
+    await db.sync_state_set(chat_id, last_update_id)
+    return seen, edits, added
+
+
+async def _prune_deleted(db: Database, settings: Settings, chat_id: str) -> int:
+    """Drop rows whose Telegram messages were deleted natively (MTProto sweep)."""
+    entries = [
+        e
+        for e in await db.vfs_list_prefix(chat_id, "/")
+        if e.telegram_message_id > 0  # .keep rows have no remote message
+    ]
+    if not entries:
+        return 0
+    async with mtproto_session(settings) as client:
+        alive = await fetch_existing_ids(
+            client,
+            chat_id,
+            [e.telegram_message_id for e in entries],
+            max_retries=settings.max_retries,
+        )
+    pruned = 0
+    for entry in entries:
+        if entry.telegram_message_id not in alive:
+            await db.vfs_delete(entry.id)
+            pruned += 1
+            console.print(
+                f"🗑  pruned {entry.virtual_path}{entry.file_name} "
+                f"(message {entry.telegram_message_id} deleted on Telegram)"
+            )
+    return pruned
+
+
 @app.command(context_settings=NEGATIVE_ID_OK)
 def index(
     drive: Annotated[str, typer.Argument(help="Drive alias or chat_id.")],
@@ -735,73 +838,20 @@ def index(
 
     async def _run() -> None:
         settings = Settings.load()
-        edits = added = seen = 0
+        seen = edits = added = pruned = 0
         drain_error: str | None = None
 
-        async def drain(db: Database, bot: Bot, chat_id: str) -> None:
-            nonlocal seen, edits, added
-            last_update_id = await db.sync_state_get(chat_id)
-            while True:
-                offset = last_update_id + 1 if last_update_id else None
-
-                async def _fetch(off: int | None = offset) -> tuple[Update, ...]:
-                    return await bot.get_updates(
-                        offset=off,
-                        timeout=0,
-                        allowed_updates=[
-                            "message",
-                            "edited_message",
-                            "channel_post",
-                            "edited_channel_post",
-                        ],
-                    )
-
-                updates = await send_with_retry(
-                    _fetch, max_retries=settings.max_retries, what="drain updates"
-                )
-                if not updates:
-                    break
-                for update in updates:
-                    last_update_id = max(last_update_id, update.update_id)
-                    message = update.effective_message
-                    if message is None or str(message.chat.id) != chat_id:
-                        continue
-                    seen += 1
-                    meta = parse_caption(message.caption)
-                    if meta is None:
-                        continue
-                    virtual_dir, file_name = split_vfs_path(meta.full_path)
-                    is_edit = (
-                        update.edited_message is not None or update.edited_channel_post is not None
-                    ) and message.edit_date is not None
-                    existing = await db.vfs_get_by_message(chat_id, message.message_id)
-                    if is_edit and existing is not None:
-                        if existing.virtual_path != virtual_dir or existing.file_name != file_name:
-                            await db.vfs_move(existing.id, virtual_dir, file_name)
-                            edits += 1
-                    elif existing is None and reconstruct:
-                        info = media_info(message)
-                        if info is None:
-                            continue
-                        file_id, file_size = info
-                        await db.vfs_upsert(
-                            chat_id,
-                            virtual_dir,
-                            file_name,
-                            file_size,
-                            meta.sha256,
-                            file_id,
-                            message.message_id,
-                        )
-                        added += 1
-            await db.sync_state_set(chat_id, last_update_id)
-
-        pruned = 0
         async with Database(settings.database_path) as db:
             chat_id = await db.resolve_drive(drive)
             async with bot_session(settings) as bot:
                 try:
-                    await drain(db, bot, chat_id)
+                    seen, edits, added = await _drain_updates(
+                        db,
+                        bot,
+                        chat_id,
+                        reconstruct=reconstruct,
+                        max_retries=settings.max_retries,
+                    )
                 except TupError as exc:
                     drain_error = str(exc)
                 except Conflict:
@@ -810,27 +860,7 @@ def index(
                         "so the update drain is unavailable"
                     )
             if prune:
-                entries = [
-                    e
-                    for e in await db.vfs_list_prefix(chat_id, "/")
-                    if e.telegram_message_id > 0  # .keep rows have no remote message
-                ]
-                if entries:
-                    async with mtproto_session(settings) as client:
-                        alive = await fetch_existing_ids(
-                            client,
-                            chat_id,
-                            [e.telegram_message_id for e in entries],
-                            max_retries=settings.max_retries,
-                        )
-                    for entry in entries:
-                        if entry.telegram_message_id not in alive:
-                            await db.vfs_delete(entry.id)
-                            pruned += 1
-                            console.print(
-                                f"🗑  pruned {entry.virtual_path}{entry.file_name} "
-                                f"(message {entry.telegram_message_id} deleted on Telegram)"
-                            )
+                pruned = await _prune_deleted(db, settings, chat_id)
         if drain_error:
             error_console.print(
                 f"⚠️  Update drain skipped: {drain_error}. "

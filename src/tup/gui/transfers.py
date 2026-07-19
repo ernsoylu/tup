@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Coroutine
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -38,7 +38,16 @@ class Transfer:
 
     def snapshot(self) -> Transfer:
         """Immutable-ish copy safe to hand across threads."""
-        return replace(self)
+        return Transfer(
+            id=self.id,
+            kind=self.kind,
+            label=self.label,
+            detail=self.detail,
+            total=self.total,
+            done=self.done,
+            state=self.state,
+            error=self.error,
+        )
 
 
 TransferRunner = Callable[[Transfer], Coroutine[Any, Any, None]]
@@ -78,7 +87,12 @@ class TransferManager:
             try:
                 await self._worker
             except asyncio.CancelledError:
-                pass
+                # Expected: we cancelled the worker ourselves. Still propagate
+                # if shutdown() itself is being cancelled from outside.
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    self._worker = None
+                    raise
             self._worker = None
 
     async def wait_idle(self) -> None:
