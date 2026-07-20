@@ -1,6 +1,6 @@
 [project]
 name = "tup"
-version = "0.2.0"
+version = "0.0.1"
 description = "Telegram S3-style Virtual Filesystem and Uploader CLI"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -24,6 +24,7 @@ gui = [
 dev = [
     "ruff>=0.4.0",
     "mypy>=1.10.0",
+    "pyinstaller>=6.15",
 ]
 test = [
     "pytest>=8.0.0",

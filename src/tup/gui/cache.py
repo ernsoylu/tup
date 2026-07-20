@@ -29,9 +29,17 @@ def cached_path(entry: VfsEntry) -> Path:
 
 
 def is_cached(entry: VfsEntry) -> bool:
-    """True when the file is fully downloaded (size matches the index)."""
+    """True when the file is fully downloaded.
+
+    Downloads land atomically (.part rename), so a file that exists is
+    complete. Photos are re-encoded server-side by Telegram, so the
+    downloaded size never matches the original upload's recorded size —
+    existence alone decides for them; other kinds keep the strict check.
+    """
     path = cached_path(entry)
-    return path.is_file() and path.stat().st_size == entry.file_size
+    if not path.is_file():
+        return False
+    return entry.media_kind == "photo" or path.stat().st_size == entry.file_size
 
 
 def evict(entry: VfsEntry) -> bool:

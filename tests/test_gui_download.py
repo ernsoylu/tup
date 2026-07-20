@@ -53,6 +53,19 @@ def test_is_cached_requires_full_size() -> None:
     assert is_cached(entry)
 
 
+def test_is_cached_photo_ignores_size_mismatch() -> None:
+    """Telegram re-encodes photos, so the downloaded size never matches the
+    original upload's recorded size — existence alone must decide."""
+    from dataclasses import replace
+
+    entry = replace(make_entry(name="pic.jpg", size=413_900), media_kind="photo")
+    assert not is_cached(entry)
+    path = cached_path(entry)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"re-encoded jpeg, different size")
+    assert is_cached(entry)
+
+
 async def test_download_media_file_writes_atomically() -> None:
     client = FakeMtprotoClient()
     entry = make_entry()
@@ -85,10 +98,14 @@ def test_evict_removes_only_local_copy() -> None:
     assert evict(entry) is False  # already gone: no error, just a no-op
 
 
-def test_activate_row_downloads_without_opening(
+def test_activate_row_downloads_then_opens(
     fake_env: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Double-click on a non-cached file queues a download but never auto-opens."""
+    """Double-click on a non-cached file queues one download, then auto-opens it.
+
+    Repeated double-clicks while the download is in flight must not stack
+    duplicate transfers.
+    """
     from tup.gui.bridge import CoreBridge
     from tup.gui.main_window import MainWindow
 
@@ -113,6 +130,8 @@ def test_activate_row_downloads_without_opening(
     window = MainWindow(bridge)
     window.suppress_dialogs = True
     window.open_files_externally = False
+    opened: list[Path] = []
+    monkeypatch.setattr(window, "_open_local", opened.append)
     try:
         assert pump(qapp, lambda: window.file_model.rowCount() > 0)
         window.set_current_dir("/docs/")
@@ -120,9 +139,21 @@ def test_activate_row_downloads_without_opening(
         assert not row.downloaded
 
         window.activate_row(row)
+        window.activate_row(row)  # impatient second double-click: no duplicate transfer
         assert pump(qapp, lambda: window.file_model.row_at(0).downloaded), "never downloaded"
-        # No deferred auto-open was registered for the finished transfer.
-        assert window._pending_opens == {}
+        assert pump(qapp, lambda: len(opened) > 0), "never opened"
+        entry = window.file_model.row_at(0).entry
+        assert entry is not None
+        assert opened == [cached_path(entry)]
+        downloads = [t for t in window.transfers._transfers.values() if t.kind == "download"]
+        assert len(downloads) == 1
+        assert window._downloads_in_flight == {}
+
+        # Now cached: a further double-click opens instantly, no new transfer.
+        window.activate_row(window.file_model.row_at(0))
+        assert len(opened) == 2
+        downloads = [t for t in window.transfers._transfers.values() if t.kind == "download"]
+        assert len(downloads) == 1
     finally:
         window.close()
         bridge.stop()

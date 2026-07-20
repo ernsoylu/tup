@@ -12,13 +12,22 @@ from collections.abc import Callable
 
 from PyQt6.QtWidgets import QApplication
 
+_app: QApplication | None = None
+
 
 def get_qapp() -> QApplication:
-    """Process-wide QApplication (Qt allows exactly one)."""
+    """Process-wide QApplication (Qt allows exactly one).
+
+    The instance is pinned in a module global: if no caller kept a reference,
+    PyQt would garbage-collect the C++ QApplication and later widget
+    construction would abort the process.
+    """
+    global _app
     app = QApplication.instance()
     if app is None:
         app = QApplication(["tup-tests"])
     assert isinstance(app, QApplication)
+    _app = app
     return app
 
 

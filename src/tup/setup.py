@@ -14,7 +14,7 @@ from tup.uploader import TupError, bot_session
 from tup.utils import mask_token
 
 
-async def _validate_token(token: str, base_url: str | None) -> str:
+async def validate_token(token: str, base_url: str | None) -> str:
     """Live-validate the token via get_me(); returns the bot username."""
     settings = Settings.model_construct(
         telegram_bot_token=SecretStr(token),
@@ -41,7 +41,7 @@ def run_wizard() -> None:
     base_url = base_url.strip() or None
 
     try:
-        username = asyncio.run(_validate_token(token.strip(), base_url))
+        username = asyncio.run(validate_token(token.strip(), base_url))
     except TupError:
         raise
     except Exception as exc:

@@ -149,6 +149,11 @@ class _SidebarTree(QTreeView):
         self._owner.handle_tree_drop(e, self)
 
 
+def _entry_key(entry: VfsEntry) -> tuple[str, str, str]:
+    """Identity of a file for download dedup: one live transfer per drive path."""
+    return (entry.chat_id, entry.virtual_path, entry.file_name)
+
+
 def _plain(text: str) -> str:
     """Strip rich markup from hints that were written for the CLI."""
     return text.replace("[bold]", "").replace("[/bold]", "")
@@ -184,6 +189,9 @@ class MainWindow(QMainWindow):
             self._kind_icons = {}
 
         self._pending_opens: dict[int, Path] = {}
+        # One live download per file: entry key -> transfer id (None until queued).
+        self._downloads_in_flight: dict[tuple[str, str, str], int | None] = {}
+        self._download_keys: dict[int, tuple[str, str, str]] = {}
         self._have_loaded = False  # lets _on_entries skip no-op refreshes
         self.transfers = TransferManager(self._on_transfer_update_from_loop)
 
@@ -361,6 +369,8 @@ class MainWindow(QMainWindow):
         drive_menu.addSeparator()
         drive_menu.addAction("Upload log…", self._show_logs)
         drive_menu.addAction("Manage drives…", self._show_chats)
+        drive_menu.addSeparator()
+        drive_menu.addAction("Telegram settings…", self._show_setup)
 
     def _build_transfers_dock(self) -> None:
         self.transfers_panel = TransfersPanel(
@@ -580,19 +590,8 @@ class MainWindow(QMainWindow):
             self.activate_row(row)
 
     def activate_row(self, row: FileRow) -> None:
-        """Double-click: instant open when cached; otherwise download only.
-
-        A stray double-click must not both start a large download AND launch an
-        app when it lands — the explicit context-menu 'Open' keeps that combo.
-        """
-        entry = row.entry
-        if entry is None:
-            return
-        if is_cached(entry):
-            self._open_local(cached_path(entry))
-        else:
-            self._status(f"Downloading {entry.file_name} — double-click again once downloaded.")
-            self.download_row(row)
+        """Double-click: instant open when cached; otherwise download, then open."""
+        self.open_row(row)
 
     def open_row(self, row: FileRow) -> None:
         self.download_row(row, open_after=True)
@@ -608,6 +607,16 @@ class MainWindow(QMainWindow):
             else:
                 self._status(f"{entry.file_name} is already downloaded.")
             return
+        key = _entry_key(entry)
+        if key in self._downloads_in_flight:
+            # Already queued/running — don't stack a duplicate transfer; just
+            # upgrade it to open-on-arrival if that's what was asked for now.
+            transfer_id = self._downloads_in_flight[key]
+            if open_after and transfer_id is not None:
+                self._pending_opens[transfer_id] = cached_path(entry)
+            self._status(f"{entry.file_name} is already downloading.")
+            return
+        self._downloads_in_flight[key] = None
         self.transfers_dock.show()
         self.bridge.submit(
             self._enqueue_download(entry, open_after=open_after), on_error=self._show_error
@@ -630,6 +639,9 @@ class MainWindow(QMainWindow):
         transfer = await self.transfers.enqueue(
             "download", entry.file_name, f"← {entry.virtual_path}", entry.file_size, runner
         )
+        key = _entry_key(entry)
+        self._downloads_in_flight[key] = transfer.id
+        self._download_keys[transfer.id] = key
         if open_after:
             self._pending_opens[transfer.id] = dest
 
@@ -764,6 +776,10 @@ class MainWindow(QMainWindow):
 
     def _on_transfer_update(self, transfer: Transfer) -> None:
         self.transfers_panel.update_transfer(transfer)
+        if transfer.state in ("done", "failed", "cancelled", "skipped"):
+            key = self._download_keys.pop(transfer.id, None)
+            if key is not None:
+                self._downloads_in_flight.pop(key, None)
         if transfer.state == "done":
             if transfer.kind == "upload":
                 self.refresh()
@@ -971,6 +987,13 @@ class MainWindow(QMainWindow):
         dialog = ChatsDialog(self.bridge, self)
         dialog.exec()
         self._reload_drives()
+
+    def _show_setup(self) -> None:
+        from tup.gui.setup_dialog import SetupDialog
+
+        dialog = SetupDialog(existing=self.bridge.settings, parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._status("Configuration saved — restart tup to apply it.")
 
     def _go_up(self) -> None:
         if self.current_dir == "/":

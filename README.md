@@ -3,15 +3,29 @@
 Turn Telegram chats, groups, and channels into S3-style cloud storage drives with a
 POSIX-like virtual filesystem (VFS).
 
-## Install & first run
+## Install
+
+**From a release binary** (no Python required) — download the archive for your OS from
+the [releases page](../../releases), extract it, and run the bundled installer:
+
+```bash
+tar -xzf tup-v0.0.1-<os-arch>.tar.gz && cd tup-<os-arch>
+./install.sh              # installs to ~/.tup/bin and symlinks `tup` onto your PATH
+```
+
+On Windows, extract the `.zip` and run `install.ps1` instead.
+
+**From source**:
 
 ```bash
 uv sync --all-extras
 uv run tup setup          # interactive wizard: validates your bot token live
 ```
 
-Configuration lands in `~/.config/tup/.env` with `0600` permissions; the SQLite index
-lives at `~/.config/tup/registry.db`.
+First run without configuration opens the setup wizard (`tup setup` in the terminal, or
+a graphical wizard when launching `tup gui`). It walks you through the @BotFather bot
+token and the my.telegram.org API ID/hash needed for 2 GB uploads. Configuration lands
+in `~/.tup/.env` with `0600` permissions; the SQLite index lives at `~/.tup/registry.db`.
 
 ## Usage
 

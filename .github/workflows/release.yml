@@ -1,0 +1,103 @@
+name: Release
+
+# Builds single-file tup binaries (CLI + GUI) for macOS (Intel + Apple
+# Silicon), Linux, and Windows, then attaches them to a GitHub Release.
+# Trigger: push a version tag, e.g.  git tag v0.0.1 && git push origin v0.0.1
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Install Qt runtime libraries
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libopengl0 libxkbcommon0 libglib2.0-0
+      - name: Install dependencies
+        run: uv sync --all-extras
+      - name: Lint
+        run: uv run ruff check .
+      - name: Type-check
+        run: uv run mypy src
+      - name: Tests
+        run: uv run pytest
+        env:
+          QT_QPA_PLATFORM: offscreen
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: macos-arm64
+          - os: macos-13
+            target: macos-x86_64
+          - os: ubuntu-latest
+            target: linux-x86_64
+          - os: windows-latest
+            target: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Install Qt runtime libraries (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libopengl0 libxkbcommon0 libglib2.0-0
+      - name: Install dependencies
+        run: uv sync --all-extras
+      - name: Build binary
+        run: uv run pyinstaller packaging/tup.spec --distpath dist-bin --noconfirm
+      - name: Smoke-test binary (unix)
+        if: runner.os != 'Windows'
+        run: ./dist-bin/tup --version
+      - name: Smoke-test binary (windows)
+        if: runner.os == 'Windows'
+        run: .\dist-bin\tup.exe --version
+      - name: Package archive (unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p stage/tup-${{ matrix.target }}
+          cp dist-bin/tup packaging/install.sh stage/tup-${{ matrix.target }}/
+          tar -czf tup-${{ github.ref_name }}-${{ matrix.target }}.tar.gz -C stage tup-${{ matrix.target }}
+      - name: Package archive (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path stage/tup-${{ matrix.target }} | Out-Null
+          Copy-Item dist-bin/tup.exe, packaging/install.ps1 stage/tup-${{ matrix.target }}/
+          Compress-Archive -Path stage/tup-${{ matrix.target }} -DestinationPath tup-${{ github.ref_name }}-${{ matrix.target }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tup-${{ matrix.target }}
+          path: |
+            tup-*.tar.gz
+            tup-*.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            tup-*.tar.gz
+            tup-*.zip
+          generate_release_notes: true
