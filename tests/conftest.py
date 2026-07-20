@@ -31,6 +31,11 @@ def isolate_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # Wide console so rich tables don't truncate paths and messages don't wrap
     # mid-word, which would break substring assertions.
     monkeypatch.setenv("COLUMNS", "300")
+    # Rich force-enables ANSI colors when it detects GitHub Actions, which
+    # would salt captured output with escape codes and break substring asserts.
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.setenv("NO_COLOR", "1")
     monkeypatch.chdir(tmp_path)
     return config_dir
 
