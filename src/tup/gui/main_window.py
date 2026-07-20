@@ -2,13 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import json
 import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from PyQt6.QtCore import QModelIndex, QPoint, QSize, Qt, QUrl
+from PyQt6.QtCore import (
+    QByteArray,
+    QItemSelectionModel,
+    QModelIndex,
+    QPoint,
+    QSize,
+    Qt,
+    QTimer,
+    QUrl,
+)
 from PyQt6.QtGui import (
     QAction,
     QActionGroup,
@@ -24,6 +35,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
+    QDialog,
     QDockWidget,
     QFileDialog,
     QHeaderView,
@@ -38,20 +50,21 @@ from PyQt6.QtWidgets import (
     QStyle,
     QTableView,
     QToolBar,
+    QToolButton,
     QTreeView,
 )
 
 from tup.database import ChatAlias, UploadLogEntry, VfsEntry
 from tup.gui.bridge import CoreBridge
-from tup.gui.cache import cached_path, is_cached
-from tup.gui.dialogs import ChatsDialog, LogsDialog
+from tup.gui.cache import cached_path, evict, is_cached
+from tup.gui.dialogs import ChatsDialog, FolderPickerDialog, LogsDialog
 from tup.gui.models import (
-    DirNode,
+    INTERNAL_MIME,
+    PATH_ROLE,
     FileRow,
     FileSortProxy,
     FileTableModel,
-    all_dir_paths,
-    build_dir_tree,
+    build_dir_model,
     build_rows,
     human_size,
 )
@@ -61,75 +74,79 @@ from tup.gui.transfers_panel import TransfersPanel
 from tup.uploader import download_media_file, upload_file
 from tup.utils import VfsPathError, normalize_vfs_path
 
-PATH_ROLE = Qt.ItemDataRole.UserRole + 1
 
-DropHandler = Callable[[list[Path]], None]
-
-
-def _accept_file_drag(event: QDragEnterEvent | QDragMoveEvent | None) -> None:
+def _accept_drag(event: QDragEnterEvent | QDragMoveEvent | None) -> None:
+    """Accept OS file drags and internal row drags alike."""
     if event is None:
         return
     mime = event.mimeData()
-    if mime is not None and mime.hasUrls():
+    if mime is not None and (mime.hasUrls() or mime.hasFormat(INTERNAL_MIME)):
         event.acceptProposedAction()
 
 
-def _paths_from_drop(event: QDropEvent | None) -> list[Path]:
-    if event is None:
-        return []
-    mime = event.mimeData()
-    if mime is None or not mime.hasUrls():
-        return []
-    event.acceptProposedAction()
-    return [Path(url.toLocalFile()) for url in mime.urls() if url.isLocalFile()]
+def _enable_drops(view: QAbstractItemView) -> None:
+    view.setAcceptDrops(True)
+    viewport = view.viewport()
+    if viewport is not None:
+        viewport.setAcceptDrops(True)
+    view.setDropIndicatorShown(True)
 
 
 class _DropTableView(QTableView):
-    """Details view accepting OS file drops (files and folders)."""
+    """Details view: OS drops upload; internal drags move/copy between folders."""
 
-    def __init__(self, drop_handler: DropHandler) -> None:
+    def __init__(self, owner: MainWindow) -> None:
         super().__init__()
-        self._drop_handler = drop_handler
-        self.setAcceptDrops(True)
-        viewport = self.viewport()
-        if viewport is not None:
-            viewport.setAcceptDrops(True)
-        self.setDropIndicatorShown(True)
+        self._owner = owner
+        _enable_drops(self)
+        self.setDragEnabled(True)
 
     def dragEnterEvent(self, e: QDragEnterEvent | None) -> None:
-        _accept_file_drag(e)
+        _accept_drag(e)
 
     def dragMoveEvent(self, e: QDragMoveEvent | None) -> None:
-        _accept_file_drag(e)
+        _accept_drag(e)
 
     def dropEvent(self, e: QDropEvent | None) -> None:
-        paths = _paths_from_drop(e)
-        if paths:
-            self._drop_handler(paths)
+        self._owner.handle_view_drop(e, self)
 
 
 class _DropListView(QListView):
-    """Icon view accepting OS file drops (files and folders)."""
+    """Icon view: OS drops upload; internal drags move/copy between folders."""
 
-    def __init__(self, drop_handler: DropHandler) -> None:
+    def __init__(self, owner: MainWindow) -> None:
         super().__init__()
-        self._drop_handler = drop_handler
-        self.setAcceptDrops(True)
-        viewport = self.viewport()
-        if viewport is not None:
-            viewport.setAcceptDrops(True)
-        self.setDropIndicatorShown(True)
+        self._owner = owner
+        _enable_drops(self)
+        self.setDragEnabled(True)
+        self.setMovement(QListView.Movement.Static)  # no free icon rearranging
 
     def dragEnterEvent(self, e: QDragEnterEvent | None) -> None:
-        _accept_file_drag(e)
+        _accept_drag(e)
 
     def dragMoveEvent(self, e: QDragMoveEvent | None) -> None:
-        _accept_file_drag(e)
+        _accept_drag(e)
 
     def dropEvent(self, e: QDropEvent | None) -> None:
-        paths = _paths_from_drop(e)
-        if paths:
-            self._drop_handler(paths)
+        self._owner.handle_view_drop(e, self)
+
+
+class _SidebarTree(QTreeView):
+    """Folder sidebar: accepts file rows (move/copy) and OS files (upload)."""
+
+    def __init__(self, owner: MainWindow) -> None:
+        super().__init__()
+        self._owner = owner
+        _enable_drops(self)
+
+    def dragEnterEvent(self, e: QDragEnterEvent | None) -> None:
+        _accept_drag(e)
+
+    def dragMoveEvent(self, e: QDragMoveEvent | None) -> None:
+        _accept_drag(e)
+
+    def dropEvent(self, e: QDropEvent | None) -> None:
+        self._owner.handle_tree_drop(e, self)
 
 
 def _plain(text: str) -> str:
@@ -153,13 +170,21 @@ class MainWindow(QMainWindow):
         self.resize(1150, 720)
         style = self.style()
         if style is not None:
-            self._folder_icon = style.standardIcon(QStyle.StandardPixmap.SP_DirIcon)
-            self._file_icon = style.standardIcon(QStyle.StandardPixmap.SP_FileIcon)
+            sp = QStyle.StandardPixmap
+            self._folder_icon = style.standardIcon(sp.SP_DirIcon)
+            self._file_icon = style.standardIcon(sp.SP_FileIcon)
+            self._kind_icons = {
+                "video": style.standardIcon(sp.SP_MediaPlay),
+                "audio": style.standardIcon(sp.SP_MediaVolume),
+                "photo": style.standardIcon(sp.SP_FileDialogContentsView),
+            }
         else:  # pragma: no cover - style always exists in a real QApplication
             self._folder_icon = QIcon()
             self._file_icon = QIcon()
+            self._kind_icons = {}
 
         self._pending_opens: dict[int, Path] = {}
+        self._have_loaded = False  # lets _on_entries skip no-op refreshes
         self.transfers = TransferManager(self._on_transfer_update_from_loop)
 
         self._build_body()
@@ -168,6 +193,14 @@ class MainWindow(QMainWindow):
         self._status("Loading drives…")
         self.bridge.submit(self._start_transfers())
         self._reload_drives()
+
+        # Keep the view fresh when the CLI (or another device) writes the same
+        # SQLite index. _on_entries drops unchanged results, so idle polls are
+        # cheap and never disturb selection or scroll position.
+        self._auto_refresh_timer = QTimer(self)
+        self._auto_refresh_timer.setInterval(30_000)
+        self._auto_refresh_timer.timeout.connect(self._auto_refresh)
+        self._auto_refresh_timer.start()
 
     async def _start_transfers(self) -> None:
         # create_task needs a running loop, so the worker starts on the bridge.
@@ -178,10 +211,11 @@ class MainWindow(QMainWindow):
     def _build_body(self) -> None:
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
 
-        self.table_view = _DropTableView(self.enqueue_upload_paths)
-        self.icon_view = _DropListView(self.enqueue_upload_paths)
+        self.table_view = _DropTableView(self)
+        self.icon_view = _DropListView(self)
 
-        self.tree_view = QTreeView()
+        self.tree_view = _SidebarTree(self)
+        self.tree_view.setObjectName("sidebar")  # theme: darker surface tone
         self.tree_model = QStandardItemModel(self)
         self.tree_view.setModel(self.tree_model)
         self.tree_view.setHeaderHidden(True)
@@ -191,7 +225,9 @@ class MainWindow(QMainWindow):
             tree_selection.currentChanged.connect(self._on_tree_current)
         splitter.addWidget(self.tree_view)
 
-        self.file_model = FileTableModel(self._folder_icon, self._file_icon, self)
+        self.file_model = FileTableModel(
+            self._folder_icon, self._file_icon, self, kind_icons=self._kind_icons
+        )
         self.file_proxy = FileSortProxy(self.file_model, self)
 
         self.table_view.setModel(self.file_proxy)
@@ -206,8 +242,13 @@ class MainWindow(QMainWindow):
             vertical_header.setVisible(False)
         horizontal_header = self.table_view.horizontalHeader()
         if horizontal_header is not None:
-            horizontal_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+            # Interactive (not Stretch) so every column stays user-resizable.
+            horizontal_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+            horizontal_header.resizeSection(0, 340)
             horizontal_header.setStretchLastSection(False)
+            # Residency indicator (model column 6) sits next to Name, iCloud-style.
+            horizontal_header.moveSection(6, 1)
+            horizontal_header.resizeSection(6, 28)
         self.table_view.doubleClicked.connect(self._on_double_clicked)
         self.table_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table_view.customContextMenuRequested.connect(self._on_context_menu)
@@ -257,13 +298,21 @@ class MainWindow(QMainWindow):
         self.refresh_action.triggered.connect(lambda: self.refresh())
         toolbar.addAction(self.refresh_action)
 
-        self.upload_files_action = QAction("⇪ Upload files…", self)
-        self.upload_files_action.triggered.connect(self._pick_upload_files)
-        toolbar.addAction(self.upload_files_action)
+        toolbar.addSeparator()
 
-        self.upload_folder_action = QAction("⇪ Upload folder…", self)
-        self.upload_folder_action.triggered.connect(self._pick_upload_folder)
-        toolbar.addAction(self.upload_folder_action)
+        # One prominent upload entry point: click = files, menu = files/folder.
+        self.upload_button = QToolButton(self)
+        self.upload_button.setText("⇪ Upload")
+        self.upload_button.setToolTip("Upload files (menu: upload a folder)")
+        self.upload_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        upload_menu = QMenu(self.upload_button)
+        self.upload_files_action = upload_menu.addAction("Files…", self._pick_upload_files)
+        self.upload_folder_action = upload_menu.addAction("Folder…", self._pick_upload_folder)
+        self.upload_button.setMenu(upload_menu)
+        self.upload_button.clicked.connect(self._pick_upload_files)
+        toolbar.addWidget(self.upload_button)
+
+        toolbar.addSeparator()
 
         view_group = QActionGroup(self)
         self.details_action = QAction("Details", self)
@@ -362,15 +411,25 @@ class MainWindow(QMainWindow):
         if index < 0:
             return
         self.current_dir = "/"
+        self._have_loaded = False  # a new drive must always render, even if equal
         self.refresh()
+
+    def _auto_refresh(self) -> None:
+        """Timer tick: re-query the index unless the user is mid-dialog or away."""
+        from PyQt6.QtWidgets import QApplication
+
+        if not self.isActiveWindow() or QApplication.activeModalWidget() is not None:
+            return
+        self.refresh(quiet=True)
 
     # -- data loading ----------------------------------------------------------
 
-    def refresh(self) -> None:
+    def refresh(self, *, quiet: bool = False) -> None:
         chat_id = self._current_chat_id()
         if chat_id is None:
             return
-        self._status("Loading…")
+        if not quiet:
+            self._status("Loading…")
 
         async def _fetch() -> list[VfsEntry]:
             return await self.bridge.db.vfs_list_prefix(chat_id, "/")
@@ -378,6 +437,9 @@ class MainWindow(QMainWindow):
         self.bridge.submit(_fetch(), self._on_entries, self._show_error)
 
     def _on_entries(self, entries: list[VfsEntry]) -> None:
+        if self._have_loaded and entries == self.entries:
+            return  # unchanged: keep selection, scroll, and expansion untouched
+        self._have_loaded = True
         self.entries = entries
         self._rebuild_tree()
         target = self.current_dir if self._dir_exists(self.current_dir) else "/"
@@ -389,33 +451,61 @@ class MainWindow(QMainWindow):
         return any(e.virtual_path.startswith(path) for e in self.entries)
 
     def _rebuild_tree(self) -> None:
-        root_node = build_dir_tree(self.entries)
-        self.tree_model.clear()
-        root_item = QStandardItem("/")
-        root_item.setData("/", PATH_ROLE)
-        root_item.setEditable(False)
-        root_item.setIcon(self._folder_icon)
-        self.tree_model.appendRow(root_item)
-        self._append_children(root_item, root_node)
-        self.tree_view.expandToDepth(1)
+        expanded = self._expanded_tree_paths()
+        self.tree_model = build_dir_model(self.entries, self._folder_icon, self)
+        self.tree_view.setModel(self.tree_model)
+        # setModel replaces the selection model, so reconnect navigation.
+        selection = self.tree_view.selectionModel()
+        if selection is not None:
+            selection.currentChanged.connect(self._on_tree_current)
+        if expanded:
+            self._walk_tree_items(
+                lambda item: self.tree_view.setExpanded(
+                    self.tree_model.indexFromItem(item), item.data(PATH_ROLE) in expanded
+                )
+            )
+        else:  # first load: sensible default depth
+            self.tree_view.expandToDepth(1)
 
-    def _append_children(self, parent_item: QStandardItem, node: DirNode) -> None:
-        for name in sorted(node.children):
-            child = node.children[name]
-            item = QStandardItem(name)
-            item.setData(child.path, PATH_ROLE)
-            item.setEditable(False)
-            item.setIcon(self._folder_icon)
-            parent_item.appendRow(item)
-            self._append_children(item, child)
+    def _expanded_tree_paths(self) -> set[str]:
+        """Paths currently expanded in the sidebar, so refreshes keep them open."""
+        expanded: set[str] = set()
+
+        def visit(item: QStandardItem) -> None:
+            if self.tree_view.isExpanded(self.tree_model.indexFromItem(item)):
+                path = item.data(PATH_ROLE)
+                if isinstance(path, str):
+                    expanded.add(path)
+
+        self._walk_tree_items(visit)
+        return expanded
+
+    def _walk_tree_items(self, visit: Callable[[QStandardItem], None]) -> None:
+        def walk(item: QStandardItem) -> None:
+            visit(item)
+            for i in range(item.rowCount()):
+                child = item.child(i)
+                if child is not None:
+                    walk(child)
+
+        root = self.tree_model.item(0)
+        if root is not None:
+            walk(root)
 
     # -- navigation ------------------------------------------------------------
 
     def set_current_dir(self, path: str) -> None:
+        # A refresh of the same listing must not eat the user's selection.
+        keep_selection = self._selected_file_names() if path == self.current_dir else set()
         self.current_dir = path
         self.path_edit.setText(path)
         rows = build_rows(self.entries, path, show_hidden=self.show_hidden, is_downloaded=is_cached)
         self.file_model.set_rows(rows)
+        if keep_selection:
+            self._restore_selection(keep_selection)
+        # Media-only columns appear only when the listing has something to show.
+        self.table_view.setColumnHidden(3, not any(r.width and r.height for r in rows))
+        self.table_view.setColumnHidden(4, not any(r.duration for r in rows))
         folders = sum(1 for r in rows if r.is_dir)
         files = len(rows) - folders
         total = sum(r.size for r in rows if not r.is_dir)
@@ -430,6 +520,28 @@ class MainWindow(QMainWindow):
             f"{human_size(total)}{hidden_note}"
         )
         self._select_tree_path(path)
+
+    def _active_view(self) -> QTableView | QListView:
+        return self.table_view if self.views.currentIndex() == 0 else self.icon_view
+
+    def _selected_file_names(self) -> set[str]:
+        selection = self._active_view().selectionModel()
+        if selection is None:
+            return set()
+        return {
+            self.file_proxy.row_at(index.row()).name
+            for index in selection.selectedIndexes()
+            if index.column() == 0
+        }
+
+    def _restore_selection(self, names: set[str]) -> None:
+        selection = self._active_view().selectionModel()
+        if selection is None:
+            return
+        flags = QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
+        for proxy_row in range(self.file_proxy.rowCount()):
+            if self.file_proxy.row_at(proxy_row).name in names:
+                selection.select(self.file_proxy.index(proxy_row, 0), flags)
 
     def _select_tree_path(self, path: str) -> None:
         item = self._find_tree_item(path)
@@ -465,7 +577,22 @@ class MainWindow(QMainWindow):
             base = self.current_dir if self.current_dir.endswith("/") else self.current_dir + "/"
             self.set_current_dir(base + row.name + "/")
         else:
-            self.open_row(row)
+            self.activate_row(row)
+
+    def activate_row(self, row: FileRow) -> None:
+        """Double-click: instant open when cached; otherwise download only.
+
+        A stray double-click must not both start a large download AND launch an
+        app when it lands — the explicit context-menu 'Open' keeps that combo.
+        """
+        entry = row.entry
+        if entry is None:
+            return
+        if is_cached(entry):
+            self._open_local(cached_path(entry))
+        else:
+            self._status(f"Downloading {entry.file_name} — double-click again once downloaded.")
+            self.download_row(row)
 
     def open_row(self, row: FileRow) -> None:
         self.download_row(row, open_after=True)
@@ -508,18 +635,95 @@ class MainWindow(QMainWindow):
 
     # -- uploads ----------------------------------------------------------------
 
-    def enqueue_upload_paths(self, paths: list[Path]) -> None:
-        """Upload dropped/picked files and folders into the current directory."""
+    def enqueue_upload_paths(self, paths: list[Path], dest_dir: str | None = None) -> None:
+        """Upload dropped/picked files and folders into `dest_dir` (default: here).
+
+        Folder enumeration (rglob + stat) runs off the GUI thread — a dropped
+        folder with thousands of files must never freeze the window.
+        """
         chat_id = self._current_chat_id()
         if chat_id is None:
             self._status("Add a drive before uploading.")
             return
-        targets = collect_upload_targets(paths, self.current_dir)
-        if not targets:
+        self._status(f"Scanning {len(paths)} dropped item(s)…")
+        self.bridge.submit(
+            self._collect_and_enqueue(chat_id, list(paths), dest_dir or self.current_dir),
+            self._on_upload_scan_done,
+            self._show_error,
+        )
+
+    async def _collect_and_enqueue(self, chat_id: str, paths: list[Path], base_dir: str) -> int:
+        loop = asyncio.get_running_loop()
+        targets = await loop.run_in_executor(None, collect_upload_targets, paths, base_dir)
+        await self._enqueue_uploads(chat_id, targets)
+        return len(targets)
+
+    def _on_upload_scan_done(self, count: int) -> None:
+        if count == 0:
             self._status("Nothing to upload.")
             return
         self.transfers_dock.show()
-        self.bridge.submit(self._enqueue_uploads(chat_id, targets), on_error=self._show_error)
+        self._status(f"Queued {count} file(s).")
+
+    # -- drops (OS files and internal rows) --------------------------------------
+
+    def handle_view_drop(self, event: QDropEvent | None, view: QTableView | QListView) -> None:
+        """Drop on the file panel: into the hovered subfolder, else this directory."""
+        if event is None:
+            return
+        dest = self.current_dir
+        index = view.indexAt(event.position().toPoint())
+        if index.isValid():
+            row = self.file_model.row_at(self.file_proxy.mapToSource(index).row())
+            if row.is_dir:
+                dest = self.current_dir + row.name + "/"
+        self._dispatch_drop(event, dest)
+
+    def handle_tree_drop(self, event: QDropEvent | None, view: QTreeView) -> None:
+        """Drop on the sidebar: destination is the hovered folder node."""
+        if event is None:
+            return
+        path = view.indexAt(event.position().toPoint()).data(PATH_ROLE)
+        if isinstance(path, str):
+            self._dispatch_drop(event, path)
+
+    def _dispatch_drop(self, event: QDropEvent, dest_dir: str) -> None:
+        mime = event.mimeData()
+        if mime is None:
+            return
+        if mime.hasFormat(INTERNAL_MIME):
+            event.acceptProposedAction()
+            raw = mime.data(INTERNAL_MIME)
+            payload = raw.data() if isinstance(raw, QByteArray) else raw
+            names = json.loads(payload.decode() or "[]")
+            copy = bool(
+                event.modifiers()
+                & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)
+            )
+            self.move_or_copy_names(names, dest_dir, copy=copy)
+        elif mime.hasUrls():
+            event.acceptProposedAction()
+            paths = [Path(url.toLocalFile()) for url in mime.urls() if url.isLocalFile()]
+            if paths:
+                self.enqueue_upload_paths(paths, dest_dir=dest_dir)
+
+    def move_or_copy_names(self, names: list[str], dest_dir: str, *, copy: bool = False) -> None:
+        """Move (default) or copy dragged files from the current listing."""
+        by_name: dict[str, FileRow] = {}
+        for i in range(self.file_model.rowCount()):
+            row = self.file_model.row_at(i)
+            if not row.is_dir:
+                by_name[row.name] = row
+        for name in names:
+            dragged = by_name.get(name)
+            if dragged is None or dragged.entry is None:
+                continue
+            if dragged.entry.virtual_path == dest_dir:
+                continue  # dropped where it already lives
+            if copy:
+                self.copy_row(dragged, dest_dir)
+            else:
+                self.move_row(dragged, dest_dir)
 
     async def _enqueue_uploads(self, chat_id: str, targets: list[tuple[Path, str, int]]) -> None:
         for path, dest, size in targets:
@@ -578,6 +782,14 @@ class MainWindow(QMainWindow):
         if self.open_files_externally:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
+    def _evict_row(self, entry: VfsEntry) -> None:
+        """Free local disk space; the file itself stays on Telegram."""
+        if evict(entry):
+            self._status(f"Removed local copy of {entry.file_name} (still on Telegram).")
+        else:
+            self._status(f"{entry.file_name} has no local copy.")
+        self.set_current_dir(self.current_dir)  # refresh Downloaded badges
+
     def _reveal_local(self, path: Path) -> None:
         if sys.platform == "darwin":
             subprocess.run(["/usr/bin/open", "-R", str(path)], check=False)  # noqa: S603
@@ -604,6 +816,7 @@ class MainWindow(QMainWindow):
                 entry = row.entry
                 if entry is not None and is_cached(entry):
                     menu.addAction("Show in Finder", lambda: self._reveal_local(cached_path(entry)))
+                    menu.addAction("Remove download", lambda: self._evict_row(entry))
                 menu.addSeparator()
                 menu.addAction("Copy to…", lambda: self._prompt_copy(row))
                 menu.addAction("Move to…", lambda: self._prompt_move(row))
@@ -709,9 +922,10 @@ class MainWindow(QMainWindow):
             self.create_folder(name.strip())
 
     def _prompt_destination(self, title: str) -> str | None:
-        choices = all_dir_paths(self.entries)
-        dest, ok = QInputDialog.getItem(self, title, "Destination folder:", choices, 0, True)
-        return dest if ok and dest else None
+        dialog = FolderPickerDialog(self.entries, title, self._folder_icon, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return dialog.selected_path()
 
     def _prompt_move(self, row: FileRow) -> None:
         dest = self._prompt_destination(f"Move {row.name}")
@@ -796,6 +1010,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "tup — error", _plain(text))
 
     def closeEvent(self, a0: QCloseEvent | None) -> None:
+        self._auto_refresh_timer.stop()  # no ticks into a stopping bridge
         with contextlib.suppress(Exception):  # bridge may already be stopped
             self.bridge.submit(self.transfers.shutdown()).result(timeout=5)
         self.bridge.stop()

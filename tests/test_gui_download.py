@@ -14,7 +14,7 @@ from tests._qt import get_qapp, pump
 from tests.conftest import CHAT_ID, FakeMtprotoClient
 from tup.config import Settings, default_database_path
 from tup.database import Database, VfsEntry
-from tup.gui.cache import cache_root, cached_path, is_cached
+from tup.gui.cache import cache_root, cached_path, evict, is_cached
 from tup.uploader import download_media_file
 
 HASH = "a1" * 32
@@ -72,6 +72,60 @@ async def test_download_media_file_missing_message_raises() -> None:
     client.existing_ids = set()  # everything deleted on Telegram
     with pytest.raises(TupError, match="no media"):
         await download_media_file(client, CHAT_ID, 99, Path("unused.bin"), max_retries=2)
+
+
+def test_evict_removes_only_local_copy() -> None:
+    entry = make_entry(size=4)
+    path = cached_path(entry)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"data")
+    assert is_cached(entry)
+    assert evict(entry) is True
+    assert not path.exists()
+    assert evict(entry) is False  # already gone: no error, just a no-op
+
+
+def test_activate_row_downloads_without_opening(
+    fake_env: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Double-click on a non-cached file queues a download but never auto-opens."""
+    from tup.gui.bridge import CoreBridge
+    from tup.gui.main_window import MainWindow
+
+    qapp = get_qapp()
+
+    async def _seed() -> None:
+        async with Database(default_database_path()) as db:
+            await db.alias_add("work", CHAT_ID, "Work Files")
+            await db.vfs_upsert(CHAT_ID, "/docs/", "a.pdf", 4, HASH, "", 11)
+
+    asyncio.run(_seed())
+
+    fake = FakeMtprotoClient()
+
+    async def fake_connect(settings: Any) -> FakeMtprotoClient:
+        return fake
+
+    monkeypatch.setattr("tup.gui.bridge.connect_mtproto", fake_connect)
+
+    bridge = CoreBridge(Settings.load())
+    bridge.start()
+    window = MainWindow(bridge)
+    window.suppress_dialogs = True
+    window.open_files_externally = False
+    try:
+        assert pump(qapp, lambda: window.file_model.rowCount() > 0)
+        window.set_current_dir("/docs/")
+        row = window.file_model.row_at(0)
+        assert not row.downloaded
+
+        window.activate_row(row)
+        assert pump(qapp, lambda: window.file_model.row_at(0).downloaded), "never downloaded"
+        # No deferred auto-open was registered for the finished transfer.
+        assert window._pending_opens == {}
+    finally:
+        window.close()
+        bridge.stop()
 
 
 def test_double_click_downloads_and_marks_row(

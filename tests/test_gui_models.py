@@ -97,7 +97,7 @@ def test_table_model_display_roles(qapp: QApplication) -> None:
     model.set_rows(build_rows([entry("/", "a.txt", size=2048), entry("/docs/", "b.pdf")], "/"))
     assert model.rowCount() == 2  # 'docs' folder + a.txt
     folder_idx = model.index(0, 1)
-    assert model.data(folder_idx) == "—"
+    assert model.data(folder_idx) == ""  # folders leave Size blank, no filler dash
     name = model.data(model.index(1, 0))
     assert name == "a.txt"
     assert model.data(model.index(1, 1)) == "2.0 kB"
@@ -166,3 +166,23 @@ def test_sort_proxy_name_filter(qapp: QApplication) -> None:
     proxy.setFilterFixedString("rep")
     assert proxy.rowCount() == 1
     assert proxy.row_at(0).name == "report.pdf"
+
+
+def test_mime_data_carries_file_names_only(qapp: QApplication) -> None:
+    """Internal drags serialize file rows; folders are never draggable."""
+    import json
+
+    from tup.gui.models import INTERNAL_MIME
+
+    model = FileTableModel()
+    model.set_rows(build_rows([entry("/", "a.txt"), entry("/docs/", "b.pdf")], "/"))
+    # Row 0 is the 'docs' folder, row 1 is a.txt.
+    assert not bool(model.flags(model.index(0, 0)) & Qt.ItemFlag.ItemIsDragEnabled)
+    assert bool(model.flags(model.index(1, 0)) & Qt.ItemFlag.ItemIsDragEnabled)
+
+    mime = model.mimeData([model.index(1, 0)])
+    assert mime is not None
+    assert json.loads(bytes(mime.data(INTERNAL_MIME)).decode()) == ["a.txt"]
+
+    # A folder-only selection yields no payload at all.
+    assert model.mimeData([model.index(0, 0)]) is None

@@ -176,3 +176,66 @@ def test_dropped_file_uploads_and_appears_in_listing(
     finally:
         window.close()
         bridge.stop()
+
+
+def test_panel_summary_and_terminal_bar_removal() -> None:
+    """Finished rows lose their progress bar; the summary digests the queue."""
+    from PyQt6.QtWidgets import QProgressBar
+
+    from tests._qt import get_qapp
+    from tup.gui.transfers_panel import TransfersPanel
+
+    qapp = get_qapp()  # keep a reference: the QApplication must outlive the widget
+    assert qapp is not None
+    panel = TransfersPanel(
+        on_pause=lambda: None,
+        on_resume=lambda: None,
+        on_skip=lambda: None,
+        on_cancel=lambda _id: None,
+    )
+    running = Transfer(id=1, kind="upload", label="big.bin", detail="→ /", total=100)
+    running.state = "running"
+    running.done = 40
+    panel.update_transfer(running.snapshot())
+    assert isinstance(panel.table.cellWidget(0, 3), QProgressBar)  # live bar
+
+    finished = running.snapshot()
+    finished.state = "done"
+    finished.done = 100
+    panel.update_transfer(finished)
+    assert panel.table.cellWidget(0, 3) is None  # bar removed on terminal state
+    assert "1 done" in panel.summary_label.text()
+
+    queued = Transfer(id=2, kind="download", label="clip.mp4", detail="← /", total=50)
+    panel.update_transfer(queued.snapshot())
+    assert "1 queued" in panel.summary_label.text()
+    assert "1 done" in panel.summary_label.text()
+
+
+def test_pause_button_reports_draining_state() -> None:
+    """While a transfer drains, the pause toggle says so instead of 'Resume'."""
+    from tests._qt import get_qapp
+    from tup.gui.transfers_panel import TransfersPanel
+
+    qapp = get_qapp()  # keep a reference: the QApplication must outlive the widget
+    assert qapp is not None
+    panel = TransfersPanel(
+        on_pause=lambda: None,
+        on_resume=lambda: None,
+        on_skip=lambda: None,
+        on_cancel=lambda _id: None,
+    )
+    running = Transfer(id=1, kind="upload", label="big.bin", detail="→ /", total=100)
+    running.state = "running"
+    panel.update_transfer(running.snapshot())
+
+    panel.pause_button.setChecked(True)  # user clicks Pause mid-transfer
+    assert "Pausing after current" in panel.pause_button.text()
+
+    finished = running.snapshot()
+    finished.state = "done"
+    panel.update_transfer(finished)  # queue actually holds now
+    assert "Resume queue" in panel.pause_button.text()
+
+    panel.pause_button.setChecked(False)
+    assert "Pause queue" in panel.pause_button.text()

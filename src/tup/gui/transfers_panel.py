@@ -6,10 +6,12 @@ import time
 from collections.abc import Callable
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
     QHeaderView,
+    QLabel,
     QProgressBar,
     QPushButton,
     QTableWidget,
@@ -19,7 +21,7 @@ from PyQt6.QtWidgets import (
 )
 
 from tup.gui.models import human_size
-from tup.gui.transfers import Transfer
+from tup.gui.transfers import Transfer, TransferState
 
 _ID_ROLE = Qt.ItemDataRole.UserRole + 1
 _TERMINAL = ("done", "failed", "cancelled", "skipped")
@@ -38,6 +40,7 @@ class TransfersPanel(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self.setObjectName("transfersPanel")  # theme: sits one surface below
         self._on_pause = on_pause
         self._on_resume = on_resume
         self._on_cancel = on_cancel
@@ -64,10 +67,16 @@ class TransfersPanel(QWidget):
         self.stop_button.clicked.connect(self._cancel_selected)
         controls.addWidget(self.stop_button)
 
+        controls.addStretch(1)
+        self.summary_label = QLabel("")
+        self.summary_label.setStyleSheet("color: gray;")
+        controls.addWidget(self.summary_label)
+
+        # Housekeeping, not an operational control: low emphasis, far right.
         self.clear_button = QPushButton("Clear finished")
+        self.clear_button.setFlat(True)
         self.clear_button.clicked.connect(self.clear_finished)
         controls.addWidget(self.clear_button)
-        controls.addStretch(1)
         layout.addLayout(controls)
 
         self.table = QTableWidget(0, len(_COLUMNS))
@@ -79,8 +88,12 @@ class TransfersPanel(QWidget):
             vertical_header.setVisible(False)
         horizontal_header = self.table.horizontalHeader()
         if horizontal_header is not None:
-            horizontal_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-            horizontal_header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+            # Interactive everywhere so the user can drag column widths;
+            # the trailing Status column absorbs leftover space.
+            horizontal_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+            horizontal_header.resizeSection(0, 240)
+            horizontal_header.resizeSection(3, 200)
+            horizontal_header.setStretchLastSection(True)
         layout.addWidget(self.table)
 
     # -- updates ----------------------------------------------------------------
@@ -103,13 +116,23 @@ class TransfersPanel(QWidget):
             self.table.setCellWidget(row, 3, bar)
             self.table.setItem(row, 4, QTableWidgetItem(""))
 
-        bar_widget = self.table.cellWidget(row, 3)
-        if isinstance(bar_widget, QProgressBar):
-            percent = int(transfer.done * 100 / transfer.total) if transfer.total else 0
-            bar_widget.setValue(100 if transfer.state == "done" else min(percent, 100))
+        if transfer.state in _TERMINAL:
+            # A full bright bar on a finished row reads as ongoing activity —
+            # drop the bar and let the muted Status text carry the outcome.
+            self.table.removeCellWidget(row, 3)
+            self.table.setItem(row, 3, QTableWidgetItem(""))
+        else:
+            bar_widget = self.table.cellWidget(row, 3)
+            if isinstance(bar_widget, QProgressBar):
+                percent = int(transfer.done * 100 / transfer.total) if transfer.total else 0
+                bar_widget.setValue(min(percent, 100))
         status_item = self.table.item(row, 4)
         if status_item is not None:
             status_item.setText(self._status_text(transfer))
+            if transfer.state in _TERMINAL:
+                status_item.setForeground(QColor(Qt.GlobalColor.gray))
+        self._refresh_pause_label()
+        self._refresh_summary()
 
     def _status_text(self, transfer: Transfer) -> str:
         if transfer.state == "running":
@@ -140,11 +163,27 @@ class TransfersPanel(QWidget):
     # -- controls ----------------------------------------------------------------
 
     def _on_pause_toggled(self, checked: bool) -> None:
-        self.pause_button.setText("▶ Resume queue" if checked else "⏸ Pause queue")
+        self._refresh_pause_label()
         if checked:
             self._on_pause()
         else:
             self._on_resume()
+
+    def _refresh_summary(self) -> None:
+        """One-line queue digest so the dock reads at a glance."""
+        states = [t.state for t in self._transfers.values()]
+        shown: tuple[TransferState, ...] = ("running", "queued", "done", "failed", "skipped")
+        parts = [f"{states.count(state)} {state}" for state in shown if states.count(state)]
+        self.summary_label.setText(" · ".join(parts))
+
+    def _refresh_pause_label(self) -> None:
+        """Make the pause gate honest: while draining, say so instead of 'Resume'."""
+        if not self.pause_button.isChecked():
+            self.pause_button.setText("⏸ Pause queue")
+        elif any(t.state == "running" for t in self._transfers.values()):
+            self.pause_button.setText("⏸ Pausing after current file…")
+        else:
+            self.pause_button.setText("▶ Resume queue")
 
     def _cancel_selected(self) -> None:
         selection = self.table.selectionModel()
@@ -166,6 +205,7 @@ class TransfersPanel(QWidget):
                 self.table.removeRow(row)
                 self._transfers.pop(transfer.id, None)
                 self._speed.pop(transfer.id, None)
+        self._refresh_summary()
 
     # -- helpers -----------------------------------------------------------------
 

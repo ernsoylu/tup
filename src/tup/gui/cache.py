@@ -32,3 +32,15 @@ def is_cached(entry: VfsEntry) -> bool:
     """True when the file is fully downloaded (size matches the index)."""
     path = cached_path(entry)
     return path.is_file() and path.stat().st_size == entry.file_size
+
+
+def evict(entry: VfsEntry) -> bool:
+    """Delete the local copy only — the file stays on Telegram.
+
+    Returns True when a cached file was actually removed.
+    """
+    try:
+        cached_path(entry).unlink()
+        return True
+    except FileNotFoundError:
+        return False

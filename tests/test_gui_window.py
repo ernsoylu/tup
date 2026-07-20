@@ -133,3 +133,62 @@ def test_window_without_drives_shows_hint(fake_env: str, monkeypatch: pytest.Mon
     finally:
         window.close()
         bridge.stop()
+
+
+def test_same_dir_refresh_preserves_selection(fake_env: str) -> None:
+    """Re-rendering the same listing (auto-refresh path) must keep the selection."""
+    from PyQt6.QtCore import QItemSelectionModel
+
+    from tup.gui.bridge import CoreBridge
+    from tup.gui.main_window import MainWindow
+
+    qapp = get_qapp()
+    seed_drive()
+    bridge = CoreBridge(Settings.load())
+    bridge.start()
+    window = MainWindow(bridge)
+    window.suppress_dialogs = True
+    try:
+        assert pump(qapp, lambda: window.file_model.rowCount() > 0)
+        selection = window.table_view.selectionModel()
+        assert selection is not None
+        flags = QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
+        selection.select(window.file_proxy.index(1, 0), flags)  # select 'root.txt'
+        assert window._selected_file_names() == {"root.txt"}
+
+        window.set_current_dir("/")  # same-dir re-render, e.g. an auto-refresh tick
+        assert window._selected_file_names() == {"root.txt"}
+
+        window.set_current_dir("/docs/")  # real navigation drops the selection
+        assert window._selected_file_names() == set()
+    finally:
+        window.close()
+        bridge.stop()
+
+
+def test_on_entries_short_circuits_unchanged_data(fake_env: str) -> None:
+    """Identical index results (idle auto-refresh) must not reset the models."""
+    from tup.gui.bridge import CoreBridge
+    from tup.gui.main_window import MainWindow
+
+    qapp = get_qapp()
+    seed_drive()
+    bridge = CoreBridge(Settings.load())
+    bridge.start()
+    window = MainWindow(bridge)
+    window.suppress_dialogs = True
+    try:
+        assert pump(qapp, lambda: window.file_model.rowCount() > 0)
+        resets = 0
+        window.file_model.modelReset.connect(lambda: None)  # smoke: signal exists
+
+        def count_reset() -> None:
+            nonlocal resets
+            resets += 1
+
+        window.file_model.modelReset.connect(count_reset)
+        window._on_entries(list(window.entries))  # same data → no re-render
+        assert resets == 0
+    finally:
+        window.close()
+        bridge.stop()

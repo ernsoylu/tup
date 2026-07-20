@@ -22,9 +22,12 @@ def run_gui() -> None:
 
     migrate_legacy_config()
     setup_logging()
+    from tup.gui.theme import apply_theme
+
     app = QApplication(sys.argv)
     app.setApplicationName("tup")
     app.setApplicationDisplayName("tup — Telegram Drive")
+    apply_theme(app)
 
     try:
         settings = Settings.load()

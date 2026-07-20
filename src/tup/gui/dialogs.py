@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QDialog,
+    QDialogButtonBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -12,12 +14,14 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
+    QTreeView,
     QVBoxLayout,
     QWidget,
 )
 
-from tup.database import ChatAlias, UploadLogEntry
+from tup.database import ChatAlias, UploadLogEntry, VfsEntry
 from tup.gui.bridge import CoreBridge
+from tup.gui.models import PATH_ROLE, build_dir_model
 from tup.gui.ops import op_add_chat, op_discover_chats
 
 
@@ -31,9 +35,49 @@ def _make_table(headers: list[str]) -> QTableWidget:
         vertical.setVisible(False)
     horizontal = table.horizontalHeader()
     if horizontal is not None:
+        # Interactive keeps columns user-draggable (ResizeToContents locks them);
+        # callers do a one-shot resizeColumnsToContents() after populating.
+        horizontal.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         horizontal.setStretchLastSection(True)
-        horizontal.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
     return table
+
+
+class FolderPickerDialog(QDialog):
+    """Pick a destination folder from the drive's tree (used by Copy/Move)."""
+
+    def __init__(
+        self,
+        entries: list[VfsEntry],
+        title: str,
+        folder_icon: QIcon,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(360, 420)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Destination folder:"))
+
+        self.tree = QTreeView()
+        self.tree.setHeaderHidden(True)
+        self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._model = build_dir_model(entries, folder_icon, self)
+        self.tree.setModel(self._model)
+        self.tree.expandAll()
+        self.tree.setCurrentIndex(self._model.index(0, 0))  # root preselected
+        self.tree.doubleClicked.connect(lambda _index: self.accept())
+        layout.addWidget(self.tree)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def selected_path(self) -> str | None:
+        path = self.tree.currentIndex().data(PATH_ROLE)
+        return path if isinstance(path, str) else None
 
 
 class LogsDialog(QDialog):
@@ -59,6 +103,7 @@ class LogsDialog(QDialog):
             )
             for column, value in enumerate(values):
                 self.table.setItem(row, column, QTableWidgetItem(value))
+        self.table.resizeColumnsToContents()
         layout.addWidget(self.table)
         close = QPushButton("Close")
         close.clicked.connect(self.accept)
@@ -127,6 +172,7 @@ class ChatsDialog(QDialog):
             self.alias_table.setItem(row, 0, QTableWidgetItem(alias.alias))
             self.alias_table.setItem(row, 1, QTableWidgetItem(alias.chat_id))
             self.alias_table.setItem(row, 2, QTableWidgetItem(alias.title or "-"))
+        self.alias_table.resizeColumnsToContents()
 
     # -- actions ---------------------------------------------------------------
 
@@ -186,6 +232,7 @@ class ChatsDialog(QDialog):
                 self.discovered_table.setItem(row, 0, QTableWidgetItem(chat_id))
                 self.discovered_table.setItem(row, 1, QTableWidgetItem(chat_type))
                 self.discovered_table.setItem(row, 2, QTableWidgetItem(title))
+            self.discovered_table.resizeColumnsToContents()
             self.status_label.setText(
                 f"{len(rows)} chat(s) visible."
                 if rows

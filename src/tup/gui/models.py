@@ -2,29 +2,46 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import json
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
-from PyQt6.QtCore import QAbstractTableModel, QModelIndex, QObject, QSortFilterProxyModel, Qt
-from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import (
+    QAbstractTableModel,
+    QMimeData,
+    QModelIndex,
+    QObject,
+    QSortFilterProxyModel,
+    Qt,
+)
+from PyQt6.QtGui import QIcon, QStandardItem, QStandardItemModel
 from rich.filesize import decimal as human_size
 
 from tup.database import VfsEntry
 
 __all__ = [
     "COLUMNS",
+    "INTERNAL_MIME",
+    "PATH_ROLE",
     "DirNode",
     "FileRow",
     "FileSortProxy",
     "FileTableModel",
     "all_dir_paths",
+    "build_dir_model",
     "build_dir_tree",
     "build_rows",
     "child_dirs",
     "human_size",
 ]
 
-COLUMNS = ("Name", "Size", "Kind", "Dimensions", "Duration", "Modified", "Status")
+# Last column is the residency indicator (✓ = downloaded); header stays blank.
+COLUMNS = ("Name", "Size", "Kind", "Dimensions", "Duration", "Modified", "")
+
+PATH_ROLE = Qt.ItemDataRole.UserRole + 1
+
+# Internal drag payload: JSON list of file names from the current listing.
+INTERNAL_MIME = "application/x-tup-files"
 
 
 def format_duration(seconds: int | None) -> str:
@@ -79,6 +96,35 @@ def all_dir_paths(entries: list[VfsEntry]) -> list[str]:
 
     walk(build_dir_tree(entries))
     return sorted(paths)
+
+
+def build_dir_model(
+    entries: list[VfsEntry], folder_icon: QIcon, parent: QObject | None = None
+) -> QStandardItemModel:
+    """Folder tree as a QStandardItemModel: root '/' item, paths in PATH_ROLE.
+
+    Shared by the sidebar tree and the Copy/Move folder picker so both always
+    show the same structure.
+    """
+    model = QStandardItemModel(parent)
+    root_item = QStandardItem("/")
+    root_item.setData("/", PATH_ROLE)
+    root_item.setEditable(False)
+    root_item.setIcon(folder_icon)
+    model.appendRow(root_item)
+
+    def append_children(parent_item: QStandardItem, node: DirNode) -> None:
+        for name in sorted(node.children):
+            child = node.children[name]
+            item = QStandardItem(name)
+            item.setData(child.path, PATH_ROLE)
+            item.setEditable(False)
+            item.setIcon(folder_icon)
+            parent_item.appendRow(item)
+            append_children(item, child)
+
+    append_children(root_item, build_dir_tree(entries))
+    return model
 
 
 def kind_label(name: str) -> str:
@@ -153,11 +199,14 @@ class FileTableModel(QAbstractTableModel):
         folder_icon: QIcon | None = None,
         file_icon: QIcon | None = None,
         parent: QObject | None = None,
+        *,
+        kind_icons: dict[str, QIcon] | None = None,
     ) -> None:
         super().__init__(parent)
         self._rows: list[FileRow] = []
         self._folder_icon = folder_icon or QIcon()
         self._file_icon = file_icon or QIcon()
+        self._kind_icons = kind_icons or {}  # keyed by media_kind: video/audio/photo
 
     def set_rows(self, rows: list[FileRow]) -> None:
         self.beginResetModel()
@@ -196,9 +245,10 @@ class FileTableModel(QAbstractTableModel):
             if column == 0:
                 return row.name
             if column == 1:
-                return "—" if row.is_dir else human_size(row.size)
+                # Folders show nothing: blank cells scan better than filler dashes.
+                return "" if row.is_dir else human_size(row.size)
             if column == 2:
-                return row.kind
+                return "" if row.is_dir else row.kind
             if column == 3:
                 return f"{row.width}×{row.height}" if row.width and row.height else ""
             if column == 4:
@@ -206,10 +256,44 @@ class FileTableModel(QAbstractTableModel):
             if column == 5:
                 return row.modified
             if column == 6:
-                return "✓ Downloaded" if row.downloaded else ""
+                return "✓" if row.downloaded else ""
+        if role == Qt.ItemDataRole.ToolTipRole and column == 6 and row.downloaded:
+            return "Downloaded — stored in the local cache"
         if role == Qt.ItemDataRole.DecorationRole and column == 0:
-            return self._folder_icon if row.is_dir else self._file_icon
+            if row.is_dir:
+                return self._folder_icon
+            kind = row.entry.media_kind if row.entry is not None else ""
+            return self._kind_icons.get(kind, self._file_icon)
         return None
+
+    # -- internal drag support (file rows only; folders cannot be moved) --------
+
+    def flags(self, index: QModelIndex) -> Qt.ItemFlag:
+        flags = super().flags(index)
+        if index.isValid() and 0 <= index.row() < len(self._rows):
+            if not self._rows[index.row()].is_dir:
+                flags |= Qt.ItemFlag.ItemIsDragEnabled
+        return flags
+
+    def mimeTypes(self) -> list[str]:
+        return [INTERNAL_MIME]
+
+    def mimeData(self, indexes: Iterable[QModelIndex]) -> QMimeData | None:
+        names = sorted(
+            {
+                self._rows[i.row()].name
+                for i in indexes
+                if i.isValid() and not self._rows[i.row()].is_dir
+            }
+        )
+        if not names:
+            return None
+        data = QMimeData()
+        data.setData(INTERNAL_MIME, json.dumps(names).encode())
+        return data
+
+    def supportedDragActions(self) -> Qt.DropAction:
+        return Qt.DropAction.MoveAction | Qt.DropAction.CopyAction
 
 
 class FileSortProxy(QSortFilterProxyModel):
