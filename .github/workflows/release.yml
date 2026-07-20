@@ -42,7 +42,9 @@ jobs:
         include:
           - os: macos-latest
             target: macos-arm64
-          - os: macos-13
+          # macos-13 (the old Intel label) was retired in Dec 2025;
+          # macos-15-intel is GitHub's supported Intel image through 2027.
+          - os: macos-15-intel
             target: macos-x86_64
           - os: ubuntu-latest
             target: linux-x86_64
