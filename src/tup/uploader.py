@@ -34,7 +34,7 @@ from telethon.tl.types import (
 from tup.config import Settings, config_dir
 from tup.database import Database
 from tup.progress import make_progress
-from tup.utils import MediaKind, detect_mime, normalize_vfs_path, sha256_file
+from tup.utils import MediaKind, detect_mime, extract_tags, normalize_vfs_path, sha256_file
 
 logger = logging.getLogger("tup.uploader")
 
@@ -500,6 +500,8 @@ async def upload_file(
         height=height,
         duration=duration,
         source_mtime=source_mtime,
+        user_caption=user_caption or "",
+        tags=extract_tags(user_caption),
     )
     await db.log_upload(
         str(local_path), size, chat_id, kind, "success", telegram_message_id=message_id

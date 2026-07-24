@@ -18,6 +18,7 @@ from PyQt6.QtGui import QIcon, QStandardItem, QStandardItemModel
 from rich.filesize import decimal as human_size
 
 from tup.database import VfsEntry
+from tup.utils import fallback_kind
 
 __all__ = [
     "COLUMNS",
@@ -36,7 +37,7 @@ __all__ = [
 ]
 
 # Last column is the residency indicator (✓ = downloaded); header stays blank.
-COLUMNS = ("Name", "Size", "Kind", "Dimensions", "Duration", "Modified", "")
+COLUMNS = ("Name", "Size", "Kind", "Tags", "Dimensions", "Duration", "Modified", "")
 
 PATH_ROLE = Qt.ItemDataRole.UserRole + 1
 
@@ -63,13 +64,19 @@ class DirNode:
     children: dict[str, DirNode] = field(default_factory=dict)
 
 
-def build_dir_tree(entries: list[VfsEntry]) -> DirNode:
-    """Derive the full folder tree from every entry's virtual_path."""
+def build_dir_tree(entries: list[VfsEntry], *, include_hidden: bool = False) -> DirNode:
+    """Derive the full folder tree from every entry's virtual_path.
+
+    Dot-directories (notably the /.Trash/ Recycle Bin) are excluded unless
+    `include_hidden` — the bin gets its own dedicated sidebar node instead.
+    """
     root = DirNode(name="/", path="/")
     for entry in entries:
         node = root
         current = "/"
         for part in (p for p in entry.virtual_path.split("/") if p):
+            if not include_hidden and part.startswith("."):
+                break
             current += part + "/"
             node = node.children.setdefault(part, DirNode(name=part, path=current))
     return root
@@ -148,6 +155,7 @@ class FileRow:
     width: int | None = None
     height: int | None = None
     duration: int | None = None
+    tags: str = ""  # space-separated, no '#'
 
     @property
     def pixels(self) -> int:
@@ -172,7 +180,17 @@ def build_rows(
             continue
         if not show_hidden and entry.file_name.startswith("."):
             continue
-        kind = entry.media_kind.capitalize() if entry.media_kind else kind_label(entry.file_name)
+        if entry.media_kind:
+            kind = entry.media_kind.capitalize()
+        else:
+            # Legacy rows carry no media_kind; infer from the extension so
+            # photos and videos imported before v2 still render as media.
+            inferred = fallback_kind(entry.file_name, "")
+            kind = (
+                inferred.capitalize()
+                if inferred in ("photo", "video", "audio")
+                else kind_label(entry.file_name)
+            )
         modified = entry.source_mtime or entry.upload_timestamp
         rows.append(
             FileRow(
@@ -186,6 +204,7 @@ def build_rows(
                 width=entry.width,
                 height=entry.height,
                 duration=entry.duration,
+                tags=entry.tags,
             )
         )
     return rows
@@ -250,19 +269,28 @@ class FileTableModel(QAbstractTableModel):
             if column == 2:
                 return "" if row.is_dir else row.kind
             if column == 3:
-                return f"{row.width}×{row.height}" if row.width and row.height else ""
+                return " ".join(f"#{t}" for t in row.tags.split()) if row.tags else ""
             if column == 4:
-                return format_duration(row.duration)
+                return f"{row.width}×{row.height}" if row.width and row.height else ""
             if column == 5:
-                return row.modified
+                return format_duration(row.duration)
             if column == 6:
+                return row.modified
+            if column == 7:
                 return "✓" if row.downloaded else ""
-        if role == Qt.ItemDataRole.ToolTipRole and column == 6 and row.downloaded:
-            return "Downloaded — stored in the local cache"
+        if role == Qt.ItemDataRole.ToolTipRole:
+            if column == 7 and row.downloaded:
+                return "Downloaded — stored in the local cache"
+            if row.entry is not None and row.entry.user_caption:
+                return row.entry.user_caption
         if role == Qt.ItemDataRole.DecorationRole and column == 0:
             if row.is_dir:
                 return self._folder_icon
-            kind = row.entry.media_kind if row.entry is not None else ""
+            kind = (
+                fallback_kind(row.entry.file_name, row.entry.media_kind)
+                if row.entry is not None
+                else ""
+            )
             return self._kind_icons.get(kind, self._file_icon)
         return None
 
@@ -322,12 +350,24 @@ class FileSortProxy(QSortFilterProxyModel):
             return a.size < b.size
         if column == 2 and a.kind.lower() != b.kind.lower():
             return a.kind.lower() < b.kind.lower()
-        if column == 3 and a.pixels != b.pixels:
+        if column == 3 and a.tags != b.tags:
+            return a.tags < b.tags
+        if column == 4 and a.pixels != b.pixels:
             return a.pixels < b.pixels
-        if column == 4 and (a.duration or 0) != (b.duration or 0):
+        if column == 5 and (a.duration or 0) != (b.duration or 0):
             return (a.duration or 0) < (b.duration or 0)
-        if column == 5 and a.modified != b.modified:
+        if column == 6 and a.modified != b.modified:
             return a.modified < b.modified
-        if column == 6 and a.downloaded != b.downloaded:
+        if column == 7 and a.downloaded != b.downloaded:
             return b.downloaded
         return a.name.lower() < b.name.lower()
+
+    def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:
+        """The filter box matches names AND tags (type '#tag' or just the tag)."""
+        pattern = self.filterRegularExpression().pattern()
+        if not pattern:
+            return True
+        if super().filterAcceptsRow(source_row, source_parent):
+            return True
+        row = self._source.row_at(source_row)
+        return pattern.lstrip("\\#").lower() in row.tags.lower()

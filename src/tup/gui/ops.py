@@ -80,8 +80,8 @@ async def op_mv(
     if await db.vfs_get(chat_id, dest, entry.file_name) is not None:
         raise TupError(f"Destination already exists: {dest}{entry.file_name}")
     full_path = _full_path(dest, entry.file_name)
-    caption = format_caption(full_path, entry.file_hash)
-    if entry.telegram_message_id > 0:
+    caption = format_caption(full_path, entry.file_hash, entry.user_caption or None)
+    if entry.telegram_message_id > 0 and entry.origin != "observed":
         async with bot_session(settings) as bot:
             await edit_caption(
                 bot, chat_id, entry.telegram_message_id, caption, max_retries=settings.max_retries
@@ -110,7 +110,7 @@ async def op_cp(
             f"as {same_hash[0].file_name} (same SHA-256)."
         )
     full_path = _full_path(dest, entry.file_name)
-    caption = format_caption(full_path, entry.file_hash)
+    caption = format_caption(full_path, entry.file_hash, entry.user_caption or None)
     message_id = await copy_message_media(
         client, chat_id, entry.telegram_message_id, caption, max_retries=settings.max_retries
     )
@@ -128,6 +128,8 @@ async def op_cp(
         height=entry.height,
         duration=entry.duration,
         source_mtime=entry.source_mtime,
+        user_caption=entry.user_caption,
+        tags=entry.tags,
     )
     return full_path
 

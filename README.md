@@ -46,8 +46,20 @@ tup ls work /docs -R
 tup mkdir work /inbox
 tup cp work /docs/report.pdf /archive/     # server-side copy, no re-upload
 tup mv work /docs/report.pdf /archive/     # path move only (no renames)
-tup rm work /archive/report.pdf
+tup rm work /archive/report.pdf            # → Recycle Bin (/.Trash/); --force purges
+tup trash list work                        # list / restore / empty the bin
 tup rmdir work /inbox
+
+# Captions, tags, editing & versions
+tup caption work /docs/report.pdf "Q3 numbers #finance #q3"
+tup tag work /docs/report.pdf urgent       # append a hashtag
+tup ls work --tag finance                  # drive-wide tag filter
+tup edit work /notes/todo.md               # $EDITOR round-trip; old revision kept
+tup versions work /notes/todo.md           # history; --restore <id> brings one back
+
+# Backups (gzipped-JSON registry dump stored on the drive itself)
+tup backup work                            # → /Backups/tup-backup-<stamp>.json.gz
+tup backup work --restore /Backups/tup-backup-20260721-120000.json.gz
 
 # Sync & reconcile
 tup sync ./backup work /backup             # skips files whose SHA-256 already matches

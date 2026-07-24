@@ -149,13 +149,13 @@ def test_media_attribute_columns_display_and_sort(qapp: QApplication) -> None:
 
     tall = next(i for i in range(model.rowCount()) if model.row_at(i).name == "tall.mp4")
     assert model.data(model.index(tall, 2)) == "Video"
-    assert model.data(model.index(tall, 3)) == "1080×1920"
-    assert model.data(model.index(tall, 4)) == "2:39"
-    assert model.data(model.index(tall, 5)) == "2026-07-01 09:30:00"  # source mtime wins
+    assert model.data(model.index(tall, 4)) == "1080×1920"
+    assert model.data(model.index(tall, 5)) == "2:39"
+    assert model.data(model.index(tall, 6)) == "2026-07-01 09:30:00"  # source mtime wins
 
-    proxy.sort(3, Qt.SortOrder.DescendingOrder)  # by pixel count
+    proxy.sort(4, Qt.SortOrder.DescendingOrder)  # by pixel count
     assert proxy.row_at(0).name == "tall.mp4"
-    proxy.sort(4, Qt.SortOrder.AscendingOrder)  # by duration (None → 0 first)
+    proxy.sort(5, Qt.SortOrder.AscendingOrder)  # by duration (None → 0 first)
     assert proxy.row_at(0).name == "small.jpg"
 
 

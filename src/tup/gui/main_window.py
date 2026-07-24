@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import subprocess
 import sys
 from collections.abc import Callable
@@ -57,6 +58,7 @@ from PyQt6.QtWidgets import (
 from tup.database import ChatAlias, UploadLogEntry, VfsEntry
 from tup.gui.bridge import CoreBridge
 from tup.gui.cache import cached_path, evict, is_cached
+from tup.gui.cache import sweep as sweep_cache
 from tup.gui.dialogs import ChatsDialog, FolderPickerDialog, LogsDialog
 from tup.gui.models import (
     INTERNAL_MIME,
@@ -68,11 +70,22 @@ from tup.gui.models import (
     build_rows,
     human_size,
 )
-from tup.gui.ops import op_cp, op_mkdir, op_mv, op_prune, op_retry_failed, op_rm, op_rmdir
+from tup.gui.ops import op_cp, op_mkdir, op_mv, op_prune, op_retry_failed, op_rmdir
 from tup.gui.transfers import Transfer, TransferManager, collect_upload_targets
 from tup.gui.transfers_panel import TransfersPanel
 from tup.uploader import download_media_file, upload_file
 from tup.utils import VfsPathError, normalize_vfs_path
+from tup.vfs_ops import (
+    TRASH_PREFIX,
+    is_trashed,
+    op_empty_trash,
+    op_purge,
+    op_restore,
+    op_set_caption,
+    op_trash,
+)
+
+logger = logging.getLogger("tup.gui")
 
 
 def _accept_drag(event: QDragEnterEvent | QDragMoveEvent | None) -> None:
@@ -200,6 +213,7 @@ class MainWindow(QMainWindow):
         self._build_transfers_dock()
         self._status("Loading drives…")
         self.bridge.submit(self._start_transfers())
+        self.bridge.submit(self._sweep_cache())
         self._reload_drives()
 
         # Keep the view fresh when the CLI (or another device) writes the same
@@ -213,6 +227,14 @@ class MainWindow(QMainWindow):
     async def _start_transfers(self) -> None:
         # create_task needs a running loop, so the worker starts on the bridge.
         self.transfers.start()
+
+    async def _sweep_cache(self) -> None:
+        """Startup eviction of stale cached downloads (LRU by last open)."""
+        ttl_seconds = self.bridge.settings.cache_ttl_hours * 3600
+        loop = asyncio.get_running_loop()
+        removed = await loop.run_in_executor(None, sweep_cache, ttl_seconds)
+        if removed:
+            logger.info("Cache sweep evicted %d stale download(s)", removed)
 
     # -- UI construction -------------------------------------------------------
 
@@ -364,6 +386,9 @@ class MainWindow(QMainWindow):
             return
         drive_menu.addAction("New folder…", self._prompt_new_folder)
         drive_menu.addSeparator()
+        drive_menu.addAction("Recycle Bin", lambda: self.set_current_dir(TRASH_PREFIX))
+        drive_menu.addAction("Empty Recycle Bin…", self.empty_trash)
+        drive_menu.addSeparator()
         drive_menu.addAction("Prune deleted messages", self._confirm_prune)
         drive_menu.addAction("Retry failed uploads", self.retry_failed)
         drive_menu.addSeparator()
@@ -463,6 +488,11 @@ class MainWindow(QMainWindow):
     def _rebuild_tree(self) -> None:
         expanded = self._expanded_tree_paths()
         self.tree_model = build_dir_model(self.entries, self._folder_icon, self)
+        if any(e.virtual_path.startswith(TRASH_PREFIX) for e in self.entries):
+            trash_item = QStandardItem("🗑 Recycle Bin")
+            trash_item.setData(TRASH_PREFIX, PATH_ROLE)
+            trash_item.setEditable(False)
+            self.tree_model.appendRow(trash_item)
         self.tree_view.setModel(self.tree_model)
         # setModel replaces the selection model, so reconnect navigation.
         selection = self.tree_view.selectionModel()
@@ -513,9 +543,10 @@ class MainWindow(QMainWindow):
         self.file_model.set_rows(rows)
         if keep_selection:
             self._restore_selection(keep_selection)
-        # Media-only columns appear only when the listing has something to show.
-        self.table_view.setColumnHidden(3, not any(r.width and r.height for r in rows))
-        self.table_view.setColumnHidden(4, not any(r.duration for r in rows))
+        # Sparse columns appear only when the listing has something to show.
+        self.table_view.setColumnHidden(3, not any(r.tags for r in rows))
+        self.table_view.setColumnHidden(4, not any(r.width and r.height for r in rows))
+        self.table_view.setColumnHidden(5, not any(r.duration for r in rows))
         folders = sum(1 for r in rows if r.is_dir)
         files = len(rows) - folders
         total = sum(r.size for r in rows if not r.is_dir)
@@ -795,6 +826,8 @@ class MainWindow(QMainWindow):
             self._pending_opens.pop(transfer.id, None)
 
     def _open_local(self, path: Path) -> None:
+        if path.is_file():
+            path.touch()  # LRU refresh: recently opened files survive cache sweeps
         if self.open_files_externally:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
@@ -822,10 +855,15 @@ class MainWindow(QMainWindow):
             menu.addAction("⟳ Refresh", lambda: self.refresh())
         else:
             row = self.file_model.row_at(self.file_proxy.mapToSource(index).row())
+            in_trash = row.entry is not None and is_trashed(row.entry)
             if row.is_dir:
                 menu.addAction("Open", lambda: self._on_double_clicked(index))
                 menu.addSeparator()
                 menu.addAction("Delete folder", lambda: self._confirm_delete(row))
+            elif in_trash:
+                menu.addAction("Restore", lambda: self.restore_row(row))
+                menu.addSeparator()
+                menu.addAction("Delete permanently", lambda: self._confirm_delete(row))
             else:
                 menu.addAction("Open", lambda: self.open_row(row))
                 menu.addAction("Download", lambda: self.download_row(row))
@@ -834,10 +872,11 @@ class MainWindow(QMainWindow):
                     menu.addAction("Show in Finder", lambda: self._reveal_local(cached_path(entry)))
                     menu.addAction("Remove download", lambda: self._evict_row(entry))
                 menu.addSeparator()
+                menu.addAction("Caption && tags…", lambda: self.edit_caption_row(row))
                 menu.addAction("Copy to…", lambda: self._prompt_copy(row))
                 menu.addAction("Move to…", lambda: self._prompt_move(row))
                 menu.addSeparator()
-                menu.addAction("Delete", lambda: self._confirm_delete(row))
+                menu.addAction("Move to Recycle Bin", lambda: self._confirm_delete(row))
         viewport = view.viewport()
         anchor = viewport if viewport is not None else view
         menu.exec(anchor.mapToGlobal(pos))
@@ -870,12 +909,82 @@ class MainWindow(QMainWindow):
         entry = row.entry
         if entry is None:
             return
+        if is_trashed(entry):
+            self.purge_row(row)
+            return
 
-        async def _rm() -> str:
-            deleted = await op_rm(self.bridge.db, self.bridge.settings, chat_id, entry)
-            return f"Deleted {deleted}"
+        async def _trash() -> str:
+            trashed = await op_trash(self.bridge.db, self.bridge.settings, chat_id, entry)
+            return f"Moved to Recycle Bin: {trashed}"
 
-        self.bridge.submit(_rm(), self._after_op, self._show_error)
+        self.bridge.submit(_trash(), self._after_op, self._show_error)
+
+    def purge_row(self, row: FileRow) -> None:
+        """Permanently delete: version messages, the current message, the row."""
+        chat_id = self._current_chat_id()
+        entry = row.entry
+        if chat_id is None or entry is None:
+            return
+
+        async def _purge() -> str:
+            await op_purge(self.bridge.db, self.bridge.settings, chat_id, entry)
+            return f"Permanently deleted {entry.virtual_path}{entry.file_name}"
+
+        self.bridge.submit(_purge(), self._after_op, self._show_error)
+
+    def restore_row(self, row: FileRow) -> None:
+        chat_id = self._current_chat_id()
+        entry = row.entry
+        if chat_id is None or entry is None:
+            return
+
+        async def _restore() -> str:
+            restored = await op_restore(self.bridge.db, self.bridge.settings, chat_id, entry)
+            return f"Restored to {restored}"
+
+        self.bridge.submit(_restore(), self._after_op, self._show_error)
+
+    def empty_trash(self) -> None:
+        chat_id = self._current_chat_id()
+        if chat_id is None:
+            return
+        if not self.suppress_dialogs:
+            answer = QMessageBox.question(
+                self,
+                "Empty Recycle Bin",
+                "Permanently delete everything in the Recycle Bin (including versions)?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        async def _empty() -> str:
+            purged = await op_empty_trash(self.bridge.db, self.bridge.settings, chat_id)
+            return f"Recycle Bin emptied: {purged} file(s) permanently deleted"
+
+        self.bridge.submit(_empty(), self._after_op, self._show_error)
+
+    def edit_caption_row(self, row: FileRow) -> None:
+        """Edit the user caption; hashtags in it become searchable tags."""
+        chat_id = self._current_chat_id()
+        entry = row.entry
+        if chat_id is None or entry is None:
+            return
+        text, ok = QInputDialog.getMultiLineText(
+            self,
+            "Caption & tags",
+            f"Caption for {entry.file_name} (hashtags become tags, e.g. #invoice #q3):",
+            entry.user_caption,
+        )
+        if not ok:
+            return
+
+        async def _set() -> str:
+            tags = await op_set_caption(
+                self.bridge.db, self.bridge.settings, chat_id, entry, text.strip()
+            )
+            return f"Caption updated — tags: {tags or '(none)'}"
+
+        self.bridge.submit(_set(), self._after_op, self._show_error)
 
     def move_row(self, row: FileRow, dest_dir: str) -> None:
         chat_id = self._current_chat_id()
@@ -954,9 +1063,15 @@ class MainWindow(QMainWindow):
             self.copy_row(row, dest)
 
     def _confirm_delete(self, row: FileRow) -> None:
+        in_trash = row.entry is not None and is_trashed(row.entry)
+        if not row.is_dir and not in_trash:
+            # Reversible: moving to the Recycle Bin needs no confirmation.
+            self.delete_row(row)
+            return
         if not self.suppress_dialogs:
             what = f"folder {row.name}" if row.is_dir else row.name
-            answer = QMessageBox.question(self, "Delete", f"Delete {what} from Telegram?")
+            verb = "Permanently delete" if in_trash else "Delete"
+            answer = QMessageBox.question(self, "Delete", f"{verb} {what} from Telegram?")
             if answer != QMessageBox.StandardButton.Yes:
                 return
         self.delete_row(row)

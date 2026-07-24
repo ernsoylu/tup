@@ -28,7 +28,6 @@ from tup.uploader import (
     access_error,
     bot_session,
     copy_message_media,
-    delete_remote_message,
     edit_caption,
     fetch_existing_ids,
     format_caption,
@@ -41,10 +40,26 @@ from tup.uploader import (
 from tup.utils import (
     SecretScrubberFormatter,
     VfsPathError,
+    extract_tags,
     is_hidden_within,
     normalize_vfs_path,
     sha256_file,
     split_vfs_path,
+)
+from tup.vfs_ops import (
+    TRASH_PREFIX,
+    full_path_of,
+    is_trashed,
+    op_empty_trash,
+    op_list_trash,
+    op_purge,
+    op_restore,
+    op_set_caption,
+    op_trash,
+    original_path_of,
+    read_message_bytes,
+    restore_version,
+    save_content,
 )
 
 KEEP_FILE = ".keep"
@@ -339,6 +354,14 @@ def _visible(entries: list[VfsEntry]) -> list[VfsEntry]:
     return [e for e in entries if e.file_name != KEEP_FILE]
 
 
+def _without_trash(entries: list[VfsEntry], base: str) -> list[VfsEntry]:
+    """Hide Recycle Bin contents from normal listings (explicit /.Trash/ paths
+    and `tup trash list` still show them)."""
+    if base.startswith(TRASH_PREFIX):
+        return entries
+    return [e for e in entries if not e.virtual_path.startswith(TRASH_PREFIX)]
+
+
 def _child_dirs(entries: list[VfsEntry], base: str) -> list[str]:
     """Immediate subdirectory names of `base` derived from deeper entries."""
     children = set()
@@ -403,7 +426,7 @@ def tree(
         base = normalize_vfs_path(path, directory=True)
         async with Database(settings.database_path) as db:
             chat_id = await db.resolve_drive(drive)
-            entries = await db.vfs_list_prefix(chat_id, base)
+            entries = _without_trash(await db.vfs_list_prefix(chat_id, base), base)
 
         root = RichTree(f"[bold blue]{base}[/bold blue]")
 
@@ -430,6 +453,10 @@ def ls(
     drive: Annotated[str, typer.Argument(help="Drive alias or chat_id.")],
     path: Annotated[str, typer.Argument(help="VFS directory to list.")] = "/",
     recursive: Annotated[bool, typer.Option("-R", "--recursive", help="List recursively.")] = False,
+    tag: Annotated[
+        str | None,
+        typer.Option("--tag", help="List only files carrying this tag (drive-wide)."),
+    ] = None,
 ) -> None:
     """List a VFS directory, POSIX `ls -lh` style (local index, no network)."""
 
@@ -438,9 +465,21 @@ def ls(
         base = normalize_vfs_path(path, directory=True)
         async with Database(settings.database_path) as db:
             chat_id = await db.resolve_drive(drive)
-            entries = await db.vfs_list_prefix(chat_id, base)
+            if tag is not None:
+                tagged = _without_trash(await db.vfs_list_by_tag(chat_id, tag), base)
+                table = Table("Path", "Size", "Tags", "Caption")
+                for entry in _visible(tagged):
+                    table.add_row(
+                        f"{entry.virtual_path}{entry.file_name}",
+                        _human_size(entry.file_size),
+                        entry.tags,
+                        entry.user_caption,
+                    )
+                console.print(table)
+                return
+            entries = _without_trash(await db.vfs_list_prefix(chat_id, base), base)
 
-        table = Table("Name", "Size", "Uploaded", "Msg ID")
+        table = Table("Name", "Size", "Uploaded", "Msg ID", "Tags")
         if recursive:
             for entry in _visible(entries):
                 table.add_row(
@@ -448,16 +487,18 @@ def ls(
                     _human_size(entry.file_size),
                     entry.upload_timestamp,
                     str(entry.telegram_message_id),
+                    entry.tags,
                 )
         else:
             for child in _child_dirs(entries, base):
-                table.add_row(f"[bold blue]{child}/[/bold blue]", "-", "-", "-")
+                table.add_row(f"[bold blue]{child}/[/bold blue]", "-", "-", "-", "-")
             for entry in _visible([e for e in entries if e.virtual_path == base]):
                 table.add_row(
                     entry.file_name,
                     _human_size(entry.file_size),
                     entry.upload_timestamp,
                     str(entry.telegram_message_id),
+                    entry.tags,
                 )
         console.print(table)
 
@@ -542,7 +583,7 @@ def cp(
                     f"as {same_hash[0].file_name} (same SHA-256)."
                 )
             full_path = dest_dir + entry.file_name if dest_dir != "/" else "/" + entry.file_name
-            caption = format_caption(full_path, entry.file_hash)
+            caption = format_caption(full_path, entry.file_hash, entry.user_caption or None)
             async with mtproto_session(settings) as client:
                 message_id = await copy_message_media(
                     client,
@@ -559,6 +600,10 @@ def cp(
                 entry.file_hash,
                 "",
                 message_id,
+                mime_type=entry.mime_type,
+                media_kind=entry.media_kind,
+                user_caption=entry.user_caption,
+                tags=entry.tags,
             )
         console.print(f"✅ {src} → {full_path} (message {message_id}, no re-upload)")
 
@@ -595,7 +640,7 @@ def mv(
             if await db.vfs_get(chat_id, dest_dir, entry.file_name) is not None:
                 raise TupError(f"Destination already exists: {dest_dir}{entry.file_name}")
             full_path = dest_dir + entry.file_name if dest_dir != "/" else "/" + entry.file_name
-            caption = format_caption(full_path, entry.file_hash)
+            caption = format_caption(full_path, entry.file_hash, entry.user_caption or None)
             async with bot_session(settings) as bot:
                 await edit_caption(
                     bot,
@@ -614,24 +659,318 @@ def mv(
 def rm(
     drive: Annotated[str, typer.Argument(help="Drive alias or chat_id.")],
     path: Annotated[str, typer.Argument(help="VFS file path to delete.")],
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Permanently delete (message + versions), bypassing the bin."),
+    ] = False,
 ) -> None:
-    """Delete a file: remote message and index row."""
+    """Move a file to the Recycle Bin (/.Trash/); --force deletes permanently.
+
+    Removing a file that is already in the bin always purges it. The trash
+    move is a caption rewrite, so the state lives in Telegram itself and other
+    tup frontends (cloud, GUI) see the same bin.
+    """
 
     async def _run() -> None:
         settings = Settings.load()
         async with Database(settings.database_path) as db:
             chat_id = await db.resolve_drive(drive)
             entry = await _require_entry(db, chat_id, path)
-            async with bot_session(settings) as bot:
-                deleted = await delete_remote_message(
-                    bot, chat_id, entry.telegram_message_id, max_retries=settings.max_retries
+            if force or is_trashed(entry):
+                await op_purge(db, settings, chat_id, entry)
+                console.print(f"✅ Permanently deleted {full_path_of(entry)}")
+                return
+            new_path = await op_trash(db, settings, chat_id, entry)
+        console.print(
+            f"🗑  Moved to Recycle Bin: {new_path}\n"
+            f"   Restore with [bold]tup trash restore {drive} {new_path}[/bold]"
+        )
+
+    run_async(_run())
+
+
+trash_app = typer.Typer(help="Recycle Bin: list, restore, and empty.", no_args_is_help=True)
+app.add_typer(trash_app, name="trash")
+
+
+@trash_app.command("list", context_settings=NEGATIVE_ID_OK)
+def trash_list(drive: Annotated[str, typer.Argument(help="Drive alias or chat_id.")]) -> None:
+    """List Recycle Bin contents with their original locations."""
+
+    async def _run() -> None:
+        settings = Settings.load()
+        async with Database(settings.database_path) as db:
+            chat_id = await db.resolve_drive(drive)
+            entries = await op_list_trash(db, chat_id)
+        table = Table("In bin", "Original path", "Size", "Deleted around")
+        for entry in entries:
+            table.add_row(
+                full_path_of(entry),
+                original_path_of(entry),
+                _human_size(entry.file_size),
+                entry.upload_timestamp,
+            )
+        console.print(table)
+        if not entries:
+            console.print("Recycle Bin is empty.")
+
+    run_async(_run())
+
+
+@trash_app.command("restore", context_settings=NEGATIVE_ID_OK)
+def trash_restore(
+    drive: Annotated[str, typer.Argument(help="Drive alias or chat_id.")],
+    path: Annotated[str, typer.Argument(help="Path in the bin (or the original path).")],
+) -> None:
+    """Move a file out of the Recycle Bin back to its original folder."""
+
+    async def _run() -> None:
+        settings = Settings.load()
+        async with Database(settings.database_path) as db:
+            chat_id = await db.resolve_drive(drive)
+            target = normalize_vfs_path(path)
+            virtual_dir, name = split_vfs_path(target)
+            entry = await db.vfs_get(chat_id, virtual_dir, name)
+            if entry is None and not target.startswith(TRASH_PREFIX):
+                # Convenience: accept the original (pre-trash) path too.
+                candidates = [
+                    e for e in await op_list_trash(db, chat_id) if original_path_of(e) == target
+                ]
+                entry = candidates[0] if candidates else None
+            if entry is None:
+                raise TupError(
+                    f"Nothing matching {target} in the Recycle Bin.",
+                    hint="See [bold]tup trash list[/bold].",
                 )
-            if not deleted:
-                error_console.print(
-                    f"⚠️  Message {entry.telegram_message_id} was already gone; cleaning index."
+            restored = await op_restore(db, settings, chat_id, entry)
+        console.print(f"✅ Restored to {restored}")
+
+    run_async(_run())
+
+
+@trash_app.command("empty", context_settings=NEGATIVE_ID_OK)
+def trash_empty(
+    drive: Annotated[str, typer.Argument(help="Drive alias or chat_id.")],
+    yes: Annotated[bool, typer.Option("--yes", help="Skip the confirmation prompt.")] = False,
+) -> None:
+    """Permanently delete everything in the Recycle Bin (messages + versions)."""
+
+    async def _count() -> tuple[str, int]:
+        settings = Settings.load()
+        async with Database(settings.database_path) as db:
+            chat_id = await db.resolve_drive(drive)
+            return chat_id, len(await op_list_trash(db, chat_id))
+
+    chat_id, count = run_async(_count())
+    if count == 0:
+        console.print("Recycle Bin is already empty.")
+        return
+    if not yes and not typer.confirm(f"Permanently delete {count} file(s) from the bin?"):
+        raise typer.Abort()
+
+    async def _run() -> None:
+        settings = Settings.load()
+        async with Database(settings.database_path) as db:
+            purged = await op_empty_trash(db, settings, chat_id)
+        console.print(f"✅ Recycle Bin emptied: {purged} file(s) permanently deleted.")
+
+    run_async(_run())
+
+
+# --- captions, tags, editing & versions ---------------------------------------
+
+
+@app.command(context_settings=NEGATIVE_ID_OK)
+def caption(
+    drive: Annotated[str, typer.Argument(help="Drive alias or chat_id.")],
+    path: Annotated[str, typer.Argument(help="VFS file path.")],
+    text: Annotated[
+        str, typer.Argument(help="Caption text; hashtags become tags. '' clears it.")
+    ] = "",
+) -> None:
+    """Set a file's user caption (hashtags in it become searchable tags)."""
+
+    async def _run() -> None:
+        settings = Settings.load()
+        async with Database(settings.database_path) as db:
+            chat_id = await db.resolve_drive(drive)
+            entry = await _require_entry(db, chat_id, path)
+            tags = await op_set_caption(db, settings, chat_id, entry, text.strip())
+        suffix = f" — tags: {tags}" if tags else ""
+        console.print(f"✅ Caption {'cleared' if not text.strip() else 'updated'}{suffix}")
+
+    run_async(_run())
+
+
+@app.command(context_settings=NEGATIVE_ID_OK)
+def tag(
+    drive: Annotated[str, typer.Argument(help="Drive alias or chat_id.")],
+    path: Annotated[str, typer.Argument(help="VFS file path.")],
+    tags: Annotated[list[str], typer.Argument(help="Tags to add (with or without '#').")],
+) -> None:
+    """Add tags to a file (appended to its caption as hashtags)."""
+
+    async def _run() -> None:
+        settings = Settings.load()
+        async with Database(settings.database_path) as db:
+            chat_id = await db.resolve_drive(drive)
+            entry = await _require_entry(db, chat_id, path)
+            current = set(entry.tags.split())
+            additions = [t.lstrip("#").lower() for t in tags]
+            fresh = [t for t in additions if t and t not in current]
+            if not fresh:
+                console.print("Nothing to do: tag(s) already present.")
+                return
+            hashtags = " ".join(f"#{t}" for t in fresh)
+            text = f"{entry.user_caption}\n{hashtags}".strip() if entry.user_caption else hashtags
+            all_tags = await op_set_caption(db, settings, chat_id, entry, text)
+        console.print(f"✅ Tags now: {all_tags}")
+
+    run_async(_run())
+
+
+@app.command(context_settings=NEGATIVE_ID_OK)
+def edit(
+    drive: Annotated[str, typer.Argument(help="Drive alias or chat_id.")],
+    path: Annotated[str, typer.Argument(help="VFS file path (text files).")],
+) -> None:
+    """Edit a file in $EDITOR; saving uploads a new revision (old one is kept
+    in the version history — see [bold]tup versions[/bold])."""
+
+    async def _run() -> None:
+        import os
+        import shlex
+        import subprocess
+        import tempfile
+
+        settings = Settings.load()
+        async with Database(settings.database_path) as db:
+            chat_id = await db.resolve_drive(drive)
+            entry = await _require_entry(db, chat_id, path)
+            async with mtproto_session(settings) as client:
+                if entry.telegram_message_id > 0:
+                    data = await read_message_bytes(
+                        client, settings, chat_id, entry.telegram_message_id
+                    )
+                else:
+                    data = b""
+                with tempfile.TemporaryDirectory(prefix="tup-edit-") as tmp:
+                    local = Path(tmp) / entry.file_name.replace("/", "_")
+                    local.write_bytes(data)
+                    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"
+                    result = await asyncio.to_thread(
+                        subprocess.run,  # noqa: S603 - user's own $EDITOR choice
+                        [*shlex.split(editor), str(local)],
+                        check=False,
+                    )
+                    if result.returncode != 0:
+                        raise TupError(f"Editor exited with status {result.returncode}; not saved.")
+                    new_data = local.read_bytes()
+                if new_data == data:
+                    console.print("No changes — nothing uploaded.")
+                    return
+                saved, _ = await save_content(
+                    db, settings, client, chat_id, entry.virtual_path, entry.file_name, new_data
                 )
-            await db.vfs_delete(entry.id)
-        console.print(f"✅ Deleted {entry.virtual_path}{entry.file_name}")
+        console.print(
+            f"✅ Saved {full_path_of(saved)} (message {saved.telegram_message_id}); "
+            "the previous revision is in the version history."
+        )
+
+    run_async(_run())
+
+
+@app.command(context_settings=NEGATIVE_ID_OK)
+def versions(
+    drive: Annotated[str, typer.Argument(help="Drive alias or chat_id.")],
+    path: Annotated[str, typer.Argument(help="VFS file path.")],
+    restore: Annotated[
+        int | None,
+        typer.Option("--restore", help="Version id to make current (re-saves its content)."),
+    ] = None,
+) -> None:
+    """List a file's version history (kept when edits replace its content)."""
+
+    async def _run() -> None:
+        settings = Settings.load()
+        async with Database(settings.database_path) as db:
+            chat_id = await db.resolve_drive(drive)
+            entry = await _require_entry(db, chat_id, path)
+            if restore is not None:
+                version = await db.version_get(restore)
+                if version is None or version.entry_id != entry.id:
+                    raise TupError(
+                        f"No version {restore} for {path}.",
+                        hint=f"See [bold]tup versions {drive} {path}[/bold].",
+                    )
+                async with mtproto_session(settings) as client:
+                    saved = await restore_version(db, settings, client, chat_id, entry, version)
+                console.print(
+                    f"✅ Version {restore} is current again "
+                    f"(message {saved.telegram_message_id}); the replaced revision was versioned."
+                )
+                return
+            history = await db.version_list(entry.id)
+        table = Table("Id", "Size", "SHA256", "Saved at", "Msg ID")
+        for version in history:
+            table.add_row(
+                str(version.id),
+                _human_size(version.file_size),
+                version.file_hash[:12] + "…",
+                version.created_at,
+                str(version.telegram_message_id),
+            )
+        console.print(table)
+        if not history:
+            console.print("No versions yet — versions appear when a file's content is replaced.")
+
+    run_async(_run())
+
+
+@app.command(context_settings=NEGATIVE_ID_OK)
+def backup(
+    drive: Annotated[str, typer.Argument(help="Drive alias or chat_id.")],
+    restore: Annotated[
+        str | None,
+        typer.Option("--restore", help="VFS path of a backup in /Backups/ to restore from."),
+    ] = None,
+    keep: Annotated[
+        int, typer.Option("--keep", help="Backups to retain in /Backups/ after a new dump.")
+    ] = 10,
+    yes: Annotated[bool, typer.Option("--yes", help="Skip the restore confirmation.")] = False,
+) -> None:
+    """Back up the registry as a gzipped-JSON VFS file under /Backups/.
+
+    With --restore, replaces the local index from a dump (Telegram messages
+    are untouched). Dumps share tup-cloud's structure, so the shared tables
+    of a cloud backup restore here too.
+    """
+    from tup.backup import make_backup, restore_database
+
+    if restore is not None and not yes:
+        if not typer.confirm("Replace the ENTIRE local index with this backup?"):
+            raise typer.Abort()
+
+    async def _run() -> None:
+        settings = Settings.load()
+        async with Database(settings.database_path) as db:
+            chat_id = await db.resolve_drive(drive)
+            if restore is not None:
+                entry = await _require_entry(db, chat_id, restore)
+                async with mtproto_session(settings) as client:
+                    data = await read_message_bytes(
+                        client, settings, chat_id, entry.telegram_message_id
+                    )
+                counts = await restore_database(db, data)
+                summary = ", ".join(f"{name}: {count}" for name, count in counts.items())
+                console.print(f"✅ Index restored — rows loaded: {summary}")
+                return
+            async with mtproto_session(settings) as client:
+                backup_path, pruned = await make_backup(
+                    db, settings, client, chat_id, keep=keep
+                )
+        pruned_note = f" ({pruned} old backup(s) pruned)" if pruned else ""
+        console.print(f"✅ Backup uploaded: {backup_path}{pruned_note}")
 
     run_async(_run())
 
@@ -737,22 +1076,59 @@ async def _reconcile_update(
     if meta is None:
         return 1, 0, 0
     virtual_dir, file_name = split_vfs_path(meta.full_path)
+    user_caption = meta.user_caption or ""
+    tags = extract_tags(user_caption)
     is_edit = (
         update.edited_message is not None or update.edited_channel_post is not None
     ) and message.edit_date is not None
     existing = await db.vfs_get_by_message(chat_id, message.message_id)
     if is_edit and existing is not None:
+        changed = 0
         if existing.virtual_path != virtual_dir or existing.file_name != file_name:
             await db.vfs_move(existing.id, virtual_dir, file_name)
-            return 1, 1, 0
-        return 1, 0, 0
+            changed = 1
+        if existing.user_caption != user_caption:
+            await db.vfs_set_caption(existing.id, user_caption, tags)
+            changed = 1
+        return 1, changed, 0
     if existing is None and reconstruct:
         info = media_info(message)
         if info is None:
             return 1, 0, 0
         file_id, file_size = info
+        # Same-path duplicate = a version chain (cloud convention): the newest
+        # message is the current revision, older ones are history.
+        at_path = await db.vfs_get(chat_id, virtual_dir, file_name)
+        if at_path is not None and at_path.telegram_message_id != message.message_id:
+            known = {v.telegram_message_id for v in await db.version_list(at_path.id)}
+            if message.message_id > at_path.telegram_message_id:
+                if at_path.telegram_message_id > 0:
+                    await db.version_add(
+                        at_path.id,
+                        chat_id,
+                        at_path.telegram_message_id,
+                        at_path.file_hash,
+                        at_path.file_size,
+                    )
+                await db.vfs_update_message(
+                    at_path.id, file_size, meta.sha256, message.message_id
+                )
+                await db.vfs_set_caption(at_path.id, user_caption, tags)
+            elif message.message_id not in known:
+                await db.version_add(
+                    at_path.id, chat_id, message.message_id, meta.sha256, file_size
+                )
+            return 1, 0, 1
         await db.vfs_upsert(
-            chat_id, virtual_dir, file_name, file_size, meta.sha256, file_id, message.message_id
+            chat_id,
+            virtual_dir,
+            file_name,
+            file_size,
+            meta.sha256,
+            file_id,
+            message.message_id,
+            user_caption=user_caption,
+            tags=tags,
         )
         return 1, 0, 1
     return 1, 0, 0

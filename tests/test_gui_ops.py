@@ -212,8 +212,8 @@ def test_window_folder_and_move_operations(
         ), "move never landed"
         assert telegram_api["editMessageCaption"].called
 
-        # Delete the now-empty /docs/ folder (rmdir has no .keep here → error path)
-        # then delete the moved file (remote delete over the mocked Bot API).
+        # Delete the moved file: default deletion moves it to the Recycle Bin
+        # (caption rewrite, never a remote delete).
         window.set_current_dir("/inbox/")
         assert pump(qapp, lambda: window.file_model.rowCount() > 0)
         file_row = next(
@@ -223,7 +223,18 @@ def test_window_folder_and_move_operations(
         )
         window.delete_row(file_row)
         assert pump(qapp, lambda: not asyncio.run(_exists("/inbox/", "a.pdf"))), (
-            "delete never landed"
+            "trash move never landed"
+        )
+        assert asyncio.run(_exists("/.Trash/inbox/", "a.pdf"))
+        assert not telegram_api["deleteMessage"].called
+
+        # Deleting from within the bin purges for real.
+        window.set_current_dir("/.Trash/inbox/")
+        assert pump(qapp, lambda: window.file_model.rowCount() > 0)
+        trashed_row = window.file_model.row_at(0)
+        window.delete_row(trashed_row)
+        assert pump(qapp, lambda: not asyncio.run(_exists("/.Trash/inbox/", "a.pdf"))), (
+            "purge never landed"
         )
         assert telegram_api["deleteMessage"].called
     finally:

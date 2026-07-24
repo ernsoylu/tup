@@ -95,6 +95,9 @@ class Settings(BaseSettings):
     )
     max_retries: int = Field(3, ge=1, le=10)
     request_timeout: int = Field(120, ge=10, le=3600)
+    cache_ttl_hours: int = Field(
+        168, ge=1, le=8760, description="Evict cached downloads untouched for this long (GUI)"
+    )
     database_path: Path = Field(default_factory=default_database_path)
     log_level: str = Field("INFO", pattern="^(DEBUG|INFO|WARNING|ERROR)$")
 

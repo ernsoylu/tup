@@ -87,7 +87,29 @@ ALTER TABLE vfs_index ADD COLUMN duration INTEGER;
 ALTER TABLE vfs_index ADD COLUMN source_mtime TEXT NOT NULL DEFAULT '';
 """
 
-SCHEMA_VERSION = 2
+# v3: cloud parity — user captions & tags (parsed from caption hashtags),
+# message ownership (origin: 'upload' | 'observed'), and file version history
+# (superseded Telegram messages of edited files, capped by the ops layer).
+# Conventions match tup-cloud so all frontends interoperate on one chat.
+_MIGRATION_V3_SQL = """
+ALTER TABLE vfs_index ADD COLUMN user_caption TEXT NOT NULL DEFAULT '';
+ALTER TABLE vfs_index ADD COLUMN tags TEXT NOT NULL DEFAULT '';
+ALTER TABLE vfs_index ADD COLUMN origin TEXT NOT NULL DEFAULT 'upload';
+
+CREATE TABLE IF NOT EXISTS file_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entry_id INTEGER NOT NULL REFERENCES vfs_index(id) ON DELETE CASCADE,
+    chat_id TEXT NOT NULL,
+    telegram_message_id INTEGER NOT NULL,
+    file_hash TEXT NOT NULL,
+    file_size INTEGER NOT NULL,
+    saved_by TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_versions_entry ON file_versions(entry_id);
+"""
+
+SCHEMA_VERSION = 3
 
 
 class DatabaseError(RuntimeError):
@@ -119,6 +141,23 @@ class VfsEntry:
     height: int | None = None
     duration: int | None = None  # seconds
     source_mtime: str = ""  # ISO 8601 mtime of the uploaded local file
+    user_caption: str = ""  # free text shown under the protocol block
+    tags: str = ""  # space-separated lowercase hashtags, no '#'
+    origin: str = "upload"  # 'upload' (tup owns the message) | 'observed'
+
+
+@dataclass(frozen=True)
+class FileVersion:
+    """A superseded Telegram message of an edited file (the old revision)."""
+
+    id: int
+    entry_id: int
+    chat_id: str
+    telegram_message_id: int
+    file_hash: str
+    file_size: int
+    saved_by: str
+    created_at: str
 
 
 @dataclass(frozen=True)
@@ -215,6 +254,12 @@ class Database:
                 "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
                 (2, utc_now_iso()),
             )
+        if current < 3:
+            await conn.executescript(_MIGRATION_V3_SQL)
+            await conn.execute(
+                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                (3, utc_now_iso()),
+            )
         await conn.commit()
 
     # --- chat aliases ---------------------------------------------------------
@@ -267,14 +312,18 @@ class Database:
         height: int | None = None,
         duration: int | None = None,
         source_mtime: str = "",
+        user_caption: str = "",
+        tags: str = "",
+        origin: str = "upload",
     ) -> None:
         await self.conn.execute(
             """
             INSERT INTO vfs_index
                 (chat_id, virtual_path, file_name, file_size, file_hash,
                  telegram_file_id, telegram_message_id, upload_timestamp,
-                 mime_type, media_kind, width, height, duration, source_mtime)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 mime_type, media_kind, width, height, duration, source_mtime,
+                 user_caption, tags, origin)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(chat_id, virtual_path, file_name) DO UPDATE SET
                 file_size = excluded.file_size,
                 file_hash = excluded.file_hash,
@@ -286,7 +335,10 @@ class Database:
                 width = excluded.width,
                 height = excluded.height,
                 duration = excluded.duration,
-                source_mtime = excluded.source_mtime
+                source_mtime = excluded.source_mtime,
+                user_caption = excluded.user_caption,
+                tags = excluded.tags,
+                origin = excluded.origin
             """,
             (
                 chat_id,
@@ -303,6 +355,9 @@ class Database:
                 height,
                 duration,
                 source_mtime,
+                user_caption,
+                tags,
+                origin,
             ),
         )
         await self.conn.commit()
@@ -366,6 +421,112 @@ class Database:
         ) as cur:
             rows = await cur.fetchall()
         return [VfsEntry(**dict(r)) for r in rows]
+
+    async def vfs_set_caption(self, entry_id: int, user_caption: str, tags: str) -> None:
+        await self.conn.execute(
+            "UPDATE vfs_index SET user_caption = ?, tags = ? WHERE id = ?",
+            (user_caption, tags, entry_id),
+        )
+        await self.conn.commit()
+
+    async def vfs_replace_content(
+        self,
+        entry_id: int,
+        file_size: int,
+        file_hash: str,
+        telegram_message_id: int,
+        mime_type: str,
+    ) -> None:
+        """Point an entry at a new Telegram message (save-through edit).
+
+        Matches tup-cloud save semantics: the row is mutated in place, media
+        kind becomes 'document', origin flips to 'upload' (tup now owns the
+        message), and upload_timestamp advances.
+        """
+        await self.conn.execute(
+            """
+            UPDATE vfs_index SET file_size = ?, file_hash = ?, telegram_message_id = ?,
+                telegram_file_id = '', mime_type = ?, media_kind = 'document',
+                origin = 'upload', upload_timestamp = ?
+            WHERE id = ?
+            """,
+            (file_size, file_hash, telegram_message_id, mime_type, utc_now_iso(), entry_id),
+        )
+        await self.conn.commit()
+
+    async def vfs_update_message(
+        self, entry_id: int, file_size: int, file_hash: str, telegram_message_id: int
+    ) -> None:
+        """Repoint an entry at another message without touching mime/kind
+        (index reconstruction: a newer same-path message becomes current)."""
+        await self.conn.execute(
+            """
+            UPDATE vfs_index SET file_size = ?, file_hash = ?, telegram_message_id = ?,
+                telegram_file_id = '', upload_timestamp = ?
+            WHERE id = ?
+            """,
+            (file_size, file_hash, telegram_message_id, utc_now_iso(), entry_id),
+        )
+        await self.conn.commit()
+
+    async def vfs_list_by_tag(self, chat_id: str, tag: str) -> list[VfsEntry]:
+        """Entries whose space-separated tags column contains `tag` (lowercased)."""
+        needle = tag.lstrip("#").lower()
+        async with self.conn.execute(
+            """
+            SELECT * FROM vfs_index
+            WHERE chat_id = ? AND ' ' || tags || ' ' LIKE ?
+            ORDER BY virtual_path, file_name
+            """,
+            (chat_id, f"% {needle} %"),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [VfsEntry(**dict(r)) for r in rows]
+
+    # --- file versions ---------------------------------------------------------
+
+    async def version_add(
+        self,
+        entry_id: int,
+        chat_id: str,
+        telegram_message_id: int,
+        file_hash: str,
+        file_size: int,
+        saved_by: str = "",
+    ) -> None:
+        await self.conn.execute(
+            """
+            INSERT INTO file_versions
+                (entry_id, chat_id, telegram_message_id, file_hash, file_size,
+                 saved_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (entry_id, chat_id, telegram_message_id, file_hash, file_size, saved_by, utc_now_iso()),
+        )
+        await self.conn.commit()
+
+    async def version_list(self, entry_id: int) -> list[FileVersion]:
+        """Versions of an entry, newest first."""
+        async with self.conn.execute(
+            "SELECT * FROM file_versions WHERE entry_id = ? ORDER BY id DESC", (entry_id,)
+        ) as cur:
+            rows = await cur.fetchall()
+        return [FileVersion(**dict(r)) for r in rows]
+
+    async def version_get(self, version_id: int) -> FileVersion | None:
+        async with self.conn.execute(
+            "SELECT * FROM file_versions WHERE id = ?", (version_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return FileVersion(**dict(row)) if row else None
+
+    async def version_delete(self, version_id: int) -> None:
+        await self.conn.execute("DELETE FROM file_versions WHERE id = ?", (version_id,))
+        await self.conn.commit()
+
+    async def versions_over_cap(self, entry_id: int, cap: int) -> list[FileVersion]:
+        """Versions beyond the newest `cap` (candidates for pruning)."""
+        return (await self.version_list(entry_id))[cap:]
 
     # --- uploads log ----------------------------------------------------------
 

@@ -47,6 +47,13 @@ def calls_to(telegram_api: respx.MockRouter, method: str) -> list[bytes]:
     ]
 
 
+def decoded(body: bytes) -> str:
+    """URL-decoded request body, so captions can be matched as plain text."""
+    from urllib.parse import unquote_plus
+
+    return unquote_plus(body.decode())
+
+
 @pytest.fixture
 def seeded(fake_env: str) -> None:
     seed(
@@ -141,13 +148,51 @@ def test_mv_rejects_rename(seeded: None, telegram_api: respx.MockRouter) -> None
     assert calls_to(telegram_api, "editMessageCaption") == []
 
 
-def test_rm_deletes_message_and_row(seeded: None, telegram_api: respx.MockRouter) -> None:
+def test_rm_moves_to_trash_by_default(seeded: None, telegram_api: respx.MockRouter) -> None:
     result = runner.invoke(app, ["rm", CHAT_ID, "/docs/a.pdf"])
+    assert result.exit_code == 0, result.output
+    # Trash is a caption rewrite (state survives in Telegram), never a delete.
+    assert calls_to(telegram_api, "deleteMessage") == []
+    edits = calls_to(telegram_api, "editMessageCaption")
+    assert len(edits) == 1 and "/.Trash/docs/a.pdf" in decoded(edits[0])
+    assert read_vfs("/docs/", "a.pdf") is None
+    assert read_vfs("/.Trash/docs/", "a.pdf") is not None
+    # The bin stays out of normal listings but shows in `tup trash list`.
+    assert "a.pdf" not in runner.invoke(app, ["ls", CHAT_ID, "/docs/"]).output
+    listing = runner.invoke(app, ["trash", "list", CHAT_ID])
+    assert "/.Trash/docs/a.pdf" in listing.output and "/docs/a.pdf" in listing.output
+
+
+def test_rm_force_deletes_message_and_row(seeded: None, telegram_api: respx.MockRouter) -> None:
+    result = runner.invoke(app, ["rm", CHAT_ID, "/docs/a.pdf", "--force"])
     assert result.exit_code == 0, result.output
     deletes = calls_to(telegram_api, "deleteMessage")
     assert len(deletes) == 1
     assert b"11" in deletes[0]  # message_id of the seeded entry
     assert read_vfs("/docs/", "a.pdf") is None
+    assert read_vfs("/.Trash/docs/", "a.pdf") is None
+
+
+def test_trash_restore_returns_file(seeded: None, telegram_api: respx.MockRouter) -> None:
+    assert runner.invoke(app, ["rm", CHAT_ID, "/docs/a.pdf"]).exit_code == 0
+    # Restoring by the ORIGINAL path is accepted as a convenience.
+    result = runner.invoke(app, ["trash", "restore", CHAT_ID, "/docs/a.pdf"])
+    assert result.exit_code == 0, result.output
+    entry = read_vfs("/docs/", "a.pdf")
+    assert entry is not None and entry.telegram_message_id == 11
+    assert read_vfs("/.Trash/docs/", "a.pdf") is None
+    # The restore rewrote the caption back to the original path.
+    last_edit = decoded(calls_to(telegram_api, "editMessageCaption")[-1])
+    assert "/docs/a.pdf" in last_edit and ".Trash" not in last_edit
+
+
+def test_trash_empty_purges_everything(seeded: None, telegram_api: respx.MockRouter) -> None:
+    assert runner.invoke(app, ["rm", CHAT_ID, "/docs/a.pdf"]).exit_code == 0
+    assert runner.invoke(app, ["rm", CHAT_ID, "/root.txt"]).exit_code == 0
+    result = runner.invoke(app, ["trash", "empty", CHAT_ID, "--yes"])
+    assert result.exit_code == 0, result.output
+    assert len(calls_to(telegram_api, "deleteMessage")) == 2
+    assert runner.invoke(app, ["trash", "list", CHAT_ID]).output.count(".Trash") == 0
 
 
 def test_rm_missing_file_errors(fake_env: str, telegram_api: respx.MockRouter) -> None:

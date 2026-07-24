@@ -99,6 +99,8 @@ async with app:
 #vfs #folder_name
 ```
 
+* **Cloud-Parity Conventions (shared with `tup-cloud`)**: Hashtags in the user caption become searchable `tags` (`#(\w+)`, lowercased, deduplicated, sorted, space-joined, `vfs` excluded). Deleting moves a file under `/.Trash/<original path>` by rewriting its caption (state survives in Telegram; restore strips the prefix; `rm --force` or deleting from the bin purges message + versions). Saving new content (`tup edit`) uploads a new message and keeps the superseded message as a `file_versions` row (cap 20). Rows with `origin='observed'` are not owned by tup: never edit, delete, or version their messages. `index --reconstruct` treats same-path duplicate messages as a version chain (newest = current).
+
 ## 6. SQLite Schemas, Indexes & Migrations (`database.py`)
 
 Initialize on startup using `aiosqlite`. Include a schema versioning table and performance indexes for hot query paths.
@@ -137,8 +139,26 @@ CREATE TABLE IF NOT EXISTS vfs_index (
     height INTEGER,
     duration INTEGER,                     -- seconds (video/audio)
     source_mtime TEXT NOT NULL DEFAULT '',-- ISO 8601 mtime of the uploaded local file
+    -- v3 cloud parity (added by migrate_v2_to_v3; conventions match tup-cloud)
+    user_caption TEXT NOT NULL DEFAULT '',-- free text shown under the protocol block
+    tags TEXT NOT NULL DEFAULT '',        -- space-separated lowercase hashtags, no '#'
+    origin TEXT NOT NULL DEFAULT 'upload',-- 'upload' (tup owns the message) | 'observed'
     UNIQUE(chat_id, virtual_path, file_name)
 );
+
+-- v3: superseded messages of edited files (the old revision survives on
+-- Telegram; capped at 20 per entry by the ops layer)
+CREATE TABLE IF NOT EXISTS file_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entry_id INTEGER NOT NULL REFERENCES vfs_index(id) ON DELETE CASCADE,
+    chat_id TEXT NOT NULL,
+    telegram_message_id INTEGER NOT NULL,
+    file_hash TEXT NOT NULL,
+    file_size INTEGER NOT NULL,
+    saved_by TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_versions_entry ON file_versions(entry_id);
 
 CREATE TABLE IF NOT EXISTS uploads_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -208,8 +228,15 @@ tup mkdir <drive> <path>                    # Create hidden '.keep' index entry
 tup cp <drive> <src> <dest>                 # Duplicate via send_document(file_id=...), no re-upload
 tup mv <drive> <src> <dest>                 # Update DB + remote edit_message_caption.
                                             # NOTE: Cannot rename file_name (Telegram API limit); path changes only.
-tup rm <drive> <path>                       # Delete DB row + remote delete_message
+tup rm <drive> <path> [--force]             # Move to /.Trash/ (caption rewrite); --force purges
 tup rmdir <drive> <path>                    # Remove '.keep' row. Error if folder not empty
+tup trash list|restore|empty <drive> [...]  # Recycle Bin management
+tup caption <drive> <path> [text]           # Set user caption; hashtags become tags
+tup tag <drive> <path> <tags...>            # Append hashtags to the caption
+tup ls <drive> --tag <tag>                  # Drive-wide tag filter
+tup edit <drive> <path>                     # $EDITOR round-trip; saves through save_content()
+tup versions <drive> <path> [--restore id]  # Version history / make an old revision current
+tup backup <drive> [--restore <vfs-path>] [--keep N]  # Registry dump to /Backups/
 
 # Sync & Reconciliation
 tup sync <local_dir> <drive> <remote_path>  # S3-style upload. Skip if local SHA256 matches DB

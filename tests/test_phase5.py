@@ -11,7 +11,7 @@ import pytest_asyncio
 
 from tests.conftest import CHAT_ID, FakeMtprotoClient, make_settings
 from tup.config import migrate_legacy_config
-from tup.database import _BASELINE_SQL, Database
+from tup.database import _BASELINE_SQL, SCHEMA_VERSION, Database
 from tup.gui.transfers import Transfer, TransferManager
 from tup.uploader import DuplicateFileError, upload_file
 
@@ -81,11 +81,13 @@ async def test_v1_database_migrates_to_v2(tmp_path: Path) -> None:
     async with Database(db_path) as db:
         async with db.conn.execute("SELECT MAX(version) AS v FROM schema_version") as cur:
             row = await cur.fetchone()
-        assert row is not None and row["v"] == 2
+        assert row is not None and row["v"] == SCHEMA_VERSION
         entry = await db.vfs_get(CHAT_ID, "/docs/", "a.pdf")
         assert entry is not None
         assert entry.mime_type == ""  # v1 rows get safe defaults
         assert entry.width is None
+        assert entry.user_caption == "" and entry.tags == ""  # v3 defaults
+        assert entry.origin == "upload"
         await db.vfs_upsert(
             CHAT_ID,
             "/docs/",

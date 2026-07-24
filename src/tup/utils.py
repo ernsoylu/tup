@@ -69,6 +69,32 @@ def _route_for_mime(mime: str) -> MediaKind:
     return "document"
 
 
+def fallback_kind(file_name: str, media_kind: str) -> str:
+    """Display kind for an index row, inferring from the extension when the
+    row predates the v2 attributes (legacy/imported rows have media_kind='')."""
+    if media_kind:
+        return media_kind
+    mime, _ = mimetypes.guess_type(file_name)
+    if mime is None:
+        return "document"
+    return _route_for_mime(mime)
+
+
+_TAG_RE = re.compile(r"#(\w+)")
+
+
+def extract_tags(text: str | None) -> str:
+    """Space-separated lowercase hashtags found in a caption ('#vfs' excluded).
+
+    Matches tup-cloud's normalization exactly (sorted, deduplicated, no '#')
+    so tag columns stay identical across frontends.
+    """
+    if not text:
+        return ""
+    tags = {m.group(1).lower() for m in _TAG_RE.finditer(text)} - {"vfs"}
+    return " ".join(sorted(tags))
+
+
 def normalize_vfs_path(path: str, *, directory: bool = False) -> str:
     """Normalize a VFS path to a root-relative POSIX path starting with '/'.
 
