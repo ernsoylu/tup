@@ -132,24 +132,45 @@ var driveFormatCmd = &cobra.Command{
 			return
 		}
 
-		// Double confirmation — make the user type the alias
+		// ── Step 1: Danger banner ──
+		pterm.Println()
 		pterm.DefaultHeader.WithFullWidth().
 			WithBackgroundStyle(pterm.NewStyle(pterm.BgRed)).
-			Println("⚠ DESTRUCTIVE OPERATION ⚠")
+			WithTextStyle(pterm.NewStyle(pterm.FgWhite, pterm.Bold)).
+			Println("⚠  DANGER: FORMAT DRIVE  ⚠")
 
-		pterm.Warning.Printf("This will permanently delete EVERY message in '%s' (chat %s).\n", alias, chatID)
-		pterm.Warning.Println("This action is IRREVERSIBLE. All files, messages, and history will be lost.")
+		pterm.Println()
+		pterm.Warning.Printf("Drive:   %s\n", alias)
+		pterm.Warning.Printf("Chat ID: %s\n", chatID)
+		pterm.Println()
+		pterm.Error.Println("This will permanently delete EVERY message, file, and media in this chat.")
+		pterm.Error.Println("This action is IRREVERSIBLE. There is no undo.")
 		pterm.Println()
 
-		confirm, _ := pterm.DefaultInteractiveTextInput.
-			WithDefaultText("Type the drive alias to confirm").Show()
+		// ── Step 2: Are you sure? ──
+		sure, _ := pterm.DefaultInteractiveConfirm.
+			WithDefaultValue(false).
+			WithDefaultText("Are you absolutely sure?").Show()
 
-		if confirm != alias {
-			pterm.Error.Println("Confirmation failed. Aborting.")
+		if !sure {
+			pterm.Info.Println("Aborted. Nothing was deleted.")
 			return
 		}
 
-		// Execute format inside a single Run() call
+		// ── Step 3: Type alias or chat ID to confirm ──
+		pterm.Println()
+		pterm.Warning.Printf("To proceed, type the drive alias (%s) or the chat ID (%s):\n", alias, chatID)
+
+		confirm, _ := pterm.DefaultInteractiveTextInput.
+			WithDefaultText("Confirm").Show()
+
+		if confirm != alias && confirm != chatID {
+			pterm.Error.Println("Confirmation did not match. Aborting.")
+			return
+		}
+
+		// ── Execute ──
+		pterm.Println()
 		err = telegram.Run(cmd.Context(), func(ctx context.Context) error {
 			return telegram.FormatChat(ctx, chatID)
 		})
