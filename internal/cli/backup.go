@@ -77,6 +77,17 @@ var backupCmd = &cobra.Command{
 			return
 		}
 
+		asJSON, _ := cmd.Flags().GetBool("json")
+		toStdout, _ := cmd.Flags().GetBool("stdout")
+		if asJSON || toStdout {
+			encoder := json.NewEncoder(os.Stdout)
+			encoder.SetIndent("", "  ")
+			if err := encoder.Encode(entries); err != nil {
+				pterm.Error.Println("JSON encoding failed:", err)
+			}
+			return
+		}
+
 		// Save to temp JSON file
 		home, _ := os.UserHomeDir()
 		backupFile := filepath.Join(home, ".tup", fmt.Sprintf("tup_backup_%s.json", alias))
@@ -116,5 +127,7 @@ var backupCmd = &cobra.Command{
 }
 
 func init() {
+	backupCmd.Flags().Bool("stdout", false, "print backup JSON to stdout instead of uploading to Telegram")
+	backupCmd.Flags().Bool("json", false, "emit backup JSON to stdout (for export / AI tools)")
 	RootCmd.AddCommand(backupCmd)
 }

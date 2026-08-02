@@ -9,10 +9,10 @@ The entry point of the CLI application. Initializes the `core.Config` and `core.
 
 ### 2. `internal/cli/`
 Utilizes `spf13/cobra` to define all POSIX commands.
-- **`posix.go`**: Contains `cp`, `ls`, `rm`, `mkdir`, utilizing the internal `vfs` and `telegram` packages to route local paths vs remote aliases.
+- **`posix.go`**: Contains `cp`, `ls`, `rm`, `mkdir`, `tree` (with `--json` export), utilizing the internal `vfs` and `telegram` packages to route local paths vs remote aliases.
 - **`setup.go`**: Contains `tup login` for interactive `pterm` prompts.
 - **`drive.go`**: Contains `tup drive add` and `tup drive list`.
-- **`backup.go`**: Contains `tup backup <alias>` for extracting VFS state to JSON.
+- **`backup.go`**: Contains `tup backup <alias>` for extracting VFS state to JSON (supports `--json` / `--stdout` export).
 - **`ai.go`**: Contains `tup ai` for generating `.tup-skill.md`.
 
 ### 3. `internal/core/`

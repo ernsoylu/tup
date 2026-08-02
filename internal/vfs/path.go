@@ -12,17 +12,28 @@ type PathInfo struct {
 }
 
 // ParsePath determines if a path is a remote Telegram drive or a local filesystem path.
-// Example: "work:/docs/file.txt" -> IsRemote: true, Alias: "work", Path: "/docs/file.txt"
-// Safely handles variations like "VFS:/", "VFS://", "VFS:///".
+// Examples:
+//
+//	"work:/docs/file.txt" -> remote work, /docs/file.txt
+//	"VFS:/" or "VFS://"   -> remote VFS, /
+//	"VFS:"                -> remote VFS, /
+//
+// Bare names without a colon remain local (e.g. "./file", "README.md").
 func ParsePath(input string) PathInfo {
-	if idx := strings.Index(input, ":"); idx != -1 && idx < len(input)-1 && input[idx+1] == '/' {
+	if idx := strings.Index(input, ":"); idx > 0 {
 		alias := input[:idx]
-		rest := "/" + strings.TrimLeft(input[idx+1:], "/")
-		cleanPath := path.Clean(rest)
-		return PathInfo{
-			IsRemote: true,
-			Alias:    alias,
-			Path:     cleanPath,
+		rest := input[idx+1:]
+		// "alias:/" "alias://path" "alias:" (root) — require empty rest or leading slash
+		if rest == "" || rest[0] == '/' {
+			cleanPath := "/"
+			if rest != "" {
+				cleanPath = path.Clean("/" + strings.TrimLeft(rest, "/"))
+			}
+			return PathInfo{
+				IsRemote: true,
+				Alias:    alias,
+				Path:     cleanPath,
+			}
 		}
 	}
 	return PathInfo{

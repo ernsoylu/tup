@@ -7,7 +7,8 @@
 - **POSIX Interface**: Use `tup cp`, `tup ls`, `tup rm`, `tup mkdir` exactly as you would natively.
 - **Chat Discovery**: Run `tup drive chats` to list your Telegram chats with their IDs — no external bots needed to find a Chat ID.
 - **Native 2GB Support**: Utilizes the `gotd/td` MTProto client to unlock Telegram's native 2GB file upload limits.
-- **VFS Backups**: Safely backup your drive's index into a JSON file embedded right in the chat.
+- **VFS Backups**: Safely backup your drive's index into a JSON file embedded right in the chat or export directly via `tup backup <alias> --json`.
+- **JSON Export**: Machine-readable `--json` output support for `tup tree` and `tup backup` for AI tools and scripts.
 - **Instant Restore**: Connect to an existing drive on a new device, and it will auto-restore the VFS from the chat history.
 - **AI Ready**: Run `tup ai` to generate instructions that teach LLMs (Cursor, Claude, Copilot, Antigravity) how to interact with your cloud files natively.
 
@@ -61,6 +62,12 @@ tup cp work:/docs/report.pdf ./downloaded.pdf
 
 # Delete a remote file
 tup rm work:/docs/report.pdf
+
+# Machine-readable JSON tree (for AI agents & scripts)
+tup tree work:/ --json
+
+# Export drive VFS index as JSON
+tup backup work --json
 ```
 
 Also available: `mv`, `mkdir`, `rmdir`, `cat`, `find`, `stat`, `tree`, `touch`, `du` — plus `tup backup <alias>` to push the VFS index into the chat itself.
