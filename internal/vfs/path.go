@@ -30,3 +30,22 @@ func ParsePath(input string) PathInfo {
 		Path:     input,
 	}
 }
+
+// Format returns a Unix-style remote path "alias:/path", or the local path as-is.
+// Path is always absolute for remote entries, so this never emits "alias://...".
+func (p PathInfo) Format() string {
+	if !p.IsRemote {
+		return p.Path
+	}
+	return FormatRemote(p.Alias, p.Path)
+}
+
+// FormatRemote joins a drive alias and path into "alias:/path".
+// Bare names and multi-slash prefixes are normalized (e.g. "nested" -> "/nested").
+func FormatRemote(alias, remotePath string) string {
+	remotePath = "/" + strings.TrimLeft(remotePath, "/")
+	if remotePath != "/" {
+		remotePath = path.Clean(remotePath)
+	}
+	return alias + ":" + remotePath
+}
