@@ -118,10 +118,60 @@ var driveChatsCmd = &cobra.Command{
 	},
 }
 
+var driveFormatCmd = &cobra.Command{
+	Use:   "format [alias]",
+	Short: "Delete ALL messages in a drive's chat (irreversible!)",
+	Args:  cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		alias := args[0]
+
+		// Resolve alias to chat ID
+		chatID, err := core.GetChatID(alias)
+		if err != nil {
+			pterm.Error.Printf("Drive '%s' not found: %s\n", alias, err)
+			return
+		}
+
+		// Double confirmation — make the user type the alias
+		pterm.DefaultHeader.WithFullWidth().
+			WithBackgroundStyle(pterm.NewStyle(pterm.BgRed)).
+			Println("⚠ DESTRUCTIVE OPERATION ⚠")
+
+		pterm.Warning.Printf("This will permanently delete EVERY message in '%s' (chat %s).\n", alias, chatID)
+		pterm.Warning.Println("This action is IRREVERSIBLE. All files, messages, and history will be lost.")
+		pterm.Println()
+
+		confirm, _ := pterm.DefaultInteractiveTextInput.
+			WithDefaultText("Type the drive alias to confirm").Show()
+
+		if confirm != alias {
+			pterm.Error.Println("Confirmation failed. Aborting.")
+			return
+		}
+
+		// Execute format inside a single Run() call
+		err = telegram.Run(cmd.Context(), func(ctx context.Context) error {
+			return telegram.FormatChat(ctx, chatID)
+		})
+		if err != nil {
+			pterm.Error.Println("Format failed:", err)
+			return
+		}
+
+		// Clear local VFS entries for this alias
+		_, dbErr := core.DB.Exec("DELETE FROM vfs_entries WHERE alias = ?", alias)
+		if dbErr != nil {
+			pterm.Warning.Println("Remote messages deleted but failed to clear local VFS:", dbErr)
+		} else {
+			pterm.Success.Printf("Local VFS entries for '%s' cleared.\n", alias)
+		}
+	},
+}
+
 func init() {
 	// Allow negative chat IDs (e.g. -1004342175024) without Cobra treating them as flags
 	driveAddCmd.Flags().SetInterspersed(false)
 	driveChatsCmd.Flags().StringP("filter", "f", "", "filter chats by name (case-insensitive)")
-	driveCmd.AddCommand(driveAddCmd, driveListCmd, driveChatsCmd)
+	driveCmd.AddCommand(driveAddCmd, driveListCmd, driveChatsCmd, driveFormatCmd)
 	RootCmd.AddCommand(driveCmd)
 }
