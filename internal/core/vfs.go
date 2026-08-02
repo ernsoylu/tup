@@ -18,11 +18,12 @@ type VfsEntry struct {
 
 // GetEntryByPath resolves a full remote path (e.g. "/docs/file.txt") to its VFS entry
 func GetEntryByPath(alias, path string) (*VfsEntry, error) {
-	if path == "/" || path == "" {
+	trimmed := strings.Trim(path, "/")
+	if trimmed == "" {
 		return &VfsEntry{ID: 0, Alias: alias, IsDir: true, Name: "/"}, nil
 	}
 
-	parts := strings.Split(strings.Trim(path, "/"), "/")
+	parts := strings.Split(trimmed, "/")
 	parentID := 0
 
 	var current *VfsEntry
@@ -46,6 +47,10 @@ func GetEntryByPath(alias, path string) (*VfsEntry, error) {
 
 		current = &entry
 		parentID = entry.ID
+	}
+
+	if current == nil {
+		return nil, fmt.Errorf("path not found: %s", path)
 	}
 
 	return current, nil

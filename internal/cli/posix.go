@@ -79,8 +79,12 @@ var rmCmd = &cobra.Command{
 		}
 
 		entry, err := core.GetEntryByPath(targetInfo.Alias, targetInfo.Path)
-		if err != nil {
-			pterm.Error.Println(err)
+		if err != nil || entry == nil {
+			if err != nil {
+				pterm.Error.Println(err)
+			} else {
+				pterm.Error.Printf("path not found: %s\n", targetInfo.Path)
+			}
 			return
 		}
 
@@ -152,8 +156,12 @@ var lsCmd = &cobra.Command{
 		}
 
 		entry, err := core.GetEntryByPath(targetInfo.Alias, targetInfo.Path)
-		if err != nil {
-			pterm.Error.Println(err)
+		if err != nil || entry == nil {
+			if err != nil {
+				pterm.Error.Println(err)
+			} else {
+				pterm.Error.Printf("path not found: %s\n", targetInfo.Path)
+			}
 			return
 		}
 
