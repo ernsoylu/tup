@@ -3,81 +3,47 @@ package vfs
 import "testing"
 
 func TestParsePath(t *testing.T) {
-	tests := []struct {
-		input   string
-		want    PathInfo
-		wantFmt string
+	// Compact rows: input, wantAlias, wantPath, wantFormat, isRemote
+	rows := []struct {
+		in, alias, path, format string
+		remote                  bool
 	}{
-		{
-			input:   "VFS:/README.md",
-			want:    PathInfo{IsRemote: true, Alias: "VFS", Path: "/README.md"},
-			wantFmt: "VFS:/README.md",
-		},
-		{
-			input:   "VFS://README.md",
-			want:    PathInfo{IsRemote: true, Alias: "VFS", Path: "/README.md"},
-			wantFmt: "VFS:/README.md",
-		},
-		{
-			input:   "VFS:///docs/a.txt",
-			want:    PathInfo{IsRemote: true, Alias: "VFS", Path: "/docs/a.txt"},
-			wantFmt: "VFS:/docs/a.txt",
-		},
-		{
-			input:   "work:/docs/file.txt",
-			want:    PathInfo{IsRemote: true, Alias: "work", Path: "/docs/file.txt"},
-			wantFmt: "work:/docs/file.txt",
-		},
-		{
-			input:   "work:/",
-			want:    PathInfo{IsRemote: true, Alias: "work", Path: "/"},
-			wantFmt: "work:/",
-		},
-		{
-			input:   "README.md",
-			want:    PathInfo{IsRemote: false, Path: "README.md"},
-			wantFmt: "README.md",
-		},
-		{
-			input:   "./local-report.pdf",
-			want:    PathInfo{IsRemote: false, Path: "./local-report.pdf"},
-			wantFmt: "./local-report.pdf",
-		},
-		{
-			input:   "VFS:",
-			want:    PathInfo{IsRemote: false, Path: "VFS:"},
-			wantFmt: "VFS:",
-		},
+		{"VFS:/README.md", "VFS", "/README.md", "VFS:/README.md", true},
+		{"VFS://README.md", "VFS", "/README.md", "VFS:/README.md", true},
+		{"VFS:///docs/a.txt", "VFS", "/docs/a.txt", "VFS:/docs/a.txt", true},
+		{"work:/docs/file.txt", "work", "/docs/file.txt", "work:/docs/file.txt", true},
+		{"work:/", "work", "/", "work:/", true},
+		{"README.md", "", "README.md", "README.md", false},
+		{"./local-report.pdf", "", "./local-report.pdf", "./local-report.pdf", false},
+		{"VFS:", "", "VFS:", "VFS:", false},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got := ParsePath(tt.input)
-			if got.IsRemote != tt.want.IsRemote || got.Alias != tt.want.Alias || got.Path != tt.want.Path {
-				t.Fatalf("ParsePath(%q) = %+v, want %+v", tt.input, got, tt.want)
+	for _, row := range rows {
+		t.Run(row.in, func(t *testing.T) {
+			got := ParsePath(row.in)
+			if got.IsRemote != row.remote || got.Alias != row.alias || got.Path != row.path {
+				t.Fatalf("ParsePath(%q) = {remote:%v alias:%q path:%q}, want {remote:%v alias:%q path:%q}",
+					row.in, got.IsRemote, got.Alias, got.Path, row.remote, row.alias, row.path)
 			}
-			if fmt := got.Format(); fmt != tt.wantFmt {
-				t.Fatalf("Format() = %q, want %q", fmt, tt.wantFmt)
+			if got.Format() != row.format {
+				t.Fatalf("Format() = %q, want %q", got.Format(), row.format)
 			}
 		})
 	}
 }
 
 func TestFormatRemote(t *testing.T) {
-	tests := []struct {
-		alias, path, want string
-	}{
+	// alias, path, want
+	cases := [][3]string{
 		{"VFS", "/README.md", "VFS:/README.md"},
 		{"VFS", "README.md", "VFS:/README.md"},
 		{"work", "/docs/a", "work:/docs/a"},
 		{"work", "", "work:/"},
 		{"work", "///nested", "work:/nested"},
 	}
-
-	for _, tt := range tests {
-		got := FormatRemote(tt.alias, tt.path)
-		if got != tt.want {
-			t.Errorf("FormatRemote(%q, %q) = %q, want %q", tt.alias, tt.path, got, tt.want)
+	for _, c := range cases {
+		if got := FormatRemote(c[0], c[1]); got != c[2] {
+			t.Errorf("FormatRemote(%q, %q) = %q, want %q", c[0], c[1], got, c[2])
 		}
 	}
 }
