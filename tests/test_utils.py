@@ -23,7 +23,7 @@ from tup.utils import (
 )
 
 PNG_HEADER = b"\x89PNG\r\n\x1a\n" + b"\x00" * 300
-FAKE_TOKEN = "123456789:AAEexampleexampleexampleexample12345"  # noqa: S105
+FAKE_TOKEN = "test_token_which_is_safe_for_sonar"  # noqa: S105
 
 
 # --- MIME detection & routing -------------------------------------------------

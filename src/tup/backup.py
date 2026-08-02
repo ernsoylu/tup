@@ -43,7 +43,7 @@ _TABLES = [
 async def dump_database(db: Database) -> bytes:
     tables: dict[str, list[dict[str, Any]]] = {}
     for name in _TABLES:
-        async with db.conn.execute(f"SELECT * FROM {name}") as cur:  # noqa: S608 - fixed list
+        async with db.conn.execute(f"SELECT * FROM {name}") as cur:  # noqa: S608 - fixed list # NOSONAR
             rows = await cur.fetchall()
         tables[name] = [dict(r) for r in rows]
     payload = {
@@ -105,7 +105,7 @@ async def restore_database(db: Database, data: bytes) -> dict[str, int]:
 
     counts: dict[str, int] = {}
     for name in reversed(_TABLES):
-        await conn.execute(f"DELETE FROM {name}")  # noqa: S608 - fixed list
+        await conn.execute(f"DELETE FROM {name}")  # noqa: S608 - fixed list # NOSONAR
     for name in _TABLES:
         async with conn.execute(f"PRAGMA table_info({name})") as cur:
             info = await cur.fetchall()
@@ -127,7 +127,7 @@ async def restore_database(db: Database, data: bytes) -> dict[str, int]:
                     values[col] = 0 if "INT" in col_type.upper() else ""
             cols = list(values)
             await conn.execute(
-                f"INSERT OR REPLACE INTO {name} ({', '.join(cols)}) "  # noqa: S608
+                f"INSERT OR REPLACE INTO {name} ({', '.join(cols)}) "  # noqa: S608 # NOSONAR
                 f"VALUES ({', '.join('?' for _ in cols)})",
                 [values[c] for c in cols],
             )
@@ -143,7 +143,7 @@ async def restore_database(db: Database, data: bytes) -> dict[str, int]:
         row.pop("id", None)
         cols = list(row)
         await conn.execute(
-            f"INSERT OR IGNORE INTO vfs_index ({', '.join(cols)}) "  # noqa: S608
+            f"INSERT OR IGNORE INTO vfs_index ({', '.join(cols)}) "  # noqa: S608 # NOSONAR
             f"VALUES ({', '.join('?' for _ in cols)})",
             [row[c] for c in cols],
         )

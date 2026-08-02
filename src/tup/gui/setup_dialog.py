@@ -55,7 +55,7 @@ class _ValidateWorker(QThread):
         try:
             username = asyncio.run(validate_token(self._token, self._base_url))
             self.result.emit(username, "")
-        except Exception as exc:  # noqa: BLE001 - surfaced verbatim in the dialog
+        except Exception as exc:  # noqa: BLE001 - surfaced verbatim in the dialog # NOSONAR
             self.result.emit("", str(exc))
 
 

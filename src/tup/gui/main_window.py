@@ -841,7 +841,7 @@ class MainWindow(QMainWindow):
 
     def _reveal_local(self, path: Path) -> None:
         if sys.platform == "darwin":
-            subprocess.run(["/usr/bin/open", "-R", str(path)], check=False)  # noqa: S603
+            subprocess.run(["/usr/bin/open", "-R", str(path)], check=False)  # noqa: S603 # NOSONAR
         else:  # pragma: no cover - non-macOS fallback opens the parent folder
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
 

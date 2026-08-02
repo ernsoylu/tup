@@ -5,15 +5,13 @@ POSIX-like virtual filesystem (VFS).
 
 ## Install
 
-**From a release binary** (no Python required) — download the archive for your OS from
-the [releases page](../../releases), extract it, and run the bundled installer:
+**Quick Install (macOS / Linux)**:
 
 ```bash
-tar -xzf tup-v0.0.1-<os-arch>.tar.gz && cd tup-<os-arch>
-./install.sh              # installs to ~/.tup/bin and symlinks `tup` onto your PATH
+curl -fsSL https://raw.githubusercontent.com/ernsoylu/tup/main/install.sh | sh
 ```
 
-On Windows, extract the `.zip` and run `install.ps1` instead.
+*(Windows: Download the `.zip` from the [releases page](../../releases), extract it, and run `install.ps1`)*
 
 **From source**:
 

@@ -859,7 +859,7 @@ def edit(
                     local.write_bytes(data)
                     editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"
                     result = await asyncio.to_thread(
-                        subprocess.run,  # noqa: S603 - user's own $EDITOR choice
+                        subprocess.run,  # noqa: S603 - user's own $EDITOR choice # NOSONAR
                         [*shlex.split(editor), str(local)],
                         check=False,
                     )

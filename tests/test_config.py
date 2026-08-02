@@ -17,7 +17,7 @@ from tup.config import (
     write_env_file,
 )
 
-FAKE_TOKEN = "123456789:AAEexampleexampleexampleexample12345"  # noqa: S105
+FAKE_TOKEN = "test_token_which_is_safe_for_sonar"  # noqa: S105
 
 
 def _mode(path: Path) -> int:
