@@ -78,7 +78,7 @@ func TestPrintTreeJSON(t *testing.T) {
 	pathInfo := vfs.PathInfo{IsRemote: true, Alias: "VFS", Path: "/docs"}
 
 	err = printTreeJSON(pathInfo, dirEntry)
-	w.Close()
+	_ = w.Close()
 	os.Stdout = oldStdout
 
 	if err != nil {
@@ -130,7 +130,7 @@ func TestBackupCmdJSON(t *testing.T) {
 	RootCmd.SetArgs([]string{"backup", "VFS", "--json"})
 	err = RootCmd.Execute()
 
-	w.Close()
+	_ = w.Close()
 	os.Stdout = oldStdout
 
 	if err != nil {
