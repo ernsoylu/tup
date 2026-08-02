@@ -12,7 +12,7 @@ import (
 )
 
 // FormatChat deletes every message in a chat. This is irreversible.
-// It automatically handles FLOOD_WAIT rate limits by waiting the requested duration.
+// It automatically handles FLOOD_WAIT rate limits and prevents infinite loops on non-deletable system messages.
 func FormatChat(ctx context.Context, chatIDStr string) error {
 	api := Client.API()
 
@@ -26,6 +26,7 @@ func FormatChat(ctx context.Context, chatIDStr string) error {
 	isChannel := id <= -1000000000000
 
 	totalDeleted := 0
+	attemptedIDs := make(map[int]bool)
 
 	for {
 		// Fetch a batch of messages with FLOOD_WAIT retry
@@ -62,18 +63,30 @@ func FormatChat(ctx context.Context, chatIDStr string) error {
 			break
 		}
 
-		// Collect message IDs
+		// Collect message IDs and check if they've already been attempted
 		ids := make([]int, 0, len(messages))
+		newIDsFound := false
+
 		for _, msg := range messages {
+			var msgID int
 			switch m := msg.(type) {
 			case *tg.Message:
-				ids = append(ids, m.ID)
+				msgID = m.ID
 			case *tg.MessageService:
-				ids = append(ids, m.ID)
+				msgID = m.ID
+			}
+
+			if msgID != 0 {
+				if !attemptedIDs[msgID] {
+					newIDsFound = true
+					attemptedIDs[msgID] = true
+				}
+				ids = append(ids, msgID)
 			}
 		}
 
-		if len(ids) == 0 {
+		// If no new deletable messages were found (i.e. all remaining messages are system creation messages that Telegram won't delete), stop
+		if !newIDsFound || len(ids) == 0 {
 			break
 		}
 
