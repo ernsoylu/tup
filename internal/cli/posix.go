@@ -253,7 +253,7 @@ func init() {
 	// Flags for ls
 	lsCmd.Flags().BoolP("all", "a", false, "do not ignore entries starting with .")
 	lsCmd.Flags().BoolP("long", "l", false, "use a long listing format")
-	lsCmd.Flags().BoolP("human-readable", "h", false, "with -l, print sizes in human readable format")
+	lsCmd.Flags().BoolP("human-readable", "H", false, "with -l, print sizes in human readable format")
 	lsCmd.Flags().BoolP("recursive", "R", false, "list subdirectories recursively")
 
 	RootCmd.AddCommand(cpCmd, mvCmd, rmCmd, rmdirCmd, mkdirCmd, lsCmd, catCmd, findCmd, statCmd, treeCmd, touchCmd, duCmd)
