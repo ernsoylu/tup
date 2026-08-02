@@ -1,8 +1,6 @@
 package cli
 
 import (
-	"fmt"
-
 	"github.com/ernsoylu/tup/internal/core"
 	"github.com/ernsoylu/tup/internal/telegram"
 	"github.com/pterm/pterm"
