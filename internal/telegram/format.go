@@ -6,12 +6,13 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
 	"github.com/pterm/pterm"
 )
 
 // FormatChat deletes every message in a chat. This is irreversible.
-// It must be called from inside a Run() callback.
+// It automatically handles FLOOD_WAIT rate limits by waiting the requested duration.
 func FormatChat(ctx context.Context, chatIDStr string) error {
 	api := Client.API()
 
@@ -27,13 +28,24 @@ func FormatChat(ctx context.Context, chatIDStr string) error {
 	totalDeleted := 0
 
 	for {
-		// Fetch a batch of messages
-		res, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
-			Peer:  peer,
-			Limit: 100,
-		})
-		if err != nil {
-			return fmt.Errorf("failed to fetch message history: %w", err)
+		// Fetch a batch of messages with FLOOD_WAIT retry
+		var res tg.MessagesMessagesClass
+		for {
+			var err error
+			res, err = api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+				Peer:  peer,
+				Limit: 100,
+			})
+			if err != nil {
+				if d, ok := telegram.AsFloodWait(err); ok {
+					waitDur := d + time.Second
+					pterm.Warning.Printf("Rate limit hit (FLOOD_WAIT). Waiting %v before retrying...\n", waitDur)
+					time.Sleep(waitDur)
+					continue
+				}
+				return fmt.Errorf("failed to fetch message history: %w", err)
+			}
+			break
 		}
 
 		var messages []tg.MessageClass
@@ -65,35 +77,45 @@ func FormatChat(ctx context.Context, chatIDStr string) error {
 			break
 		}
 
-		// Delete the batch
-		if isChannel {
-			channelPeer, ok := peer.(*tg.InputPeerChannel)
-			if !ok {
-				return fmt.Errorf("expected channel peer for channel ID")
+		// Delete the batch with FLOOD_WAIT retry
+		for {
+			var err error
+			if isChannel {
+				channelPeer, ok := peer.(*tg.InputPeerChannel)
+				if !ok {
+					return fmt.Errorf("expected channel peer for channel ID")
+				}
+				_, err = api.ChannelsDeleteMessages(ctx, &tg.ChannelsDeleteMessagesRequest{
+					Channel: &tg.InputChannel{
+						ChannelID:  channelPeer.ChannelID,
+						AccessHash: channelPeer.AccessHash,
+					},
+					ID: ids,
+				})
+			} else {
+				_, err = api.MessagesDeleteMessages(ctx, &tg.MessagesDeleteMessagesRequest{
+					Revoke: true,
+					ID:     ids,
+				})
 			}
-			_, err = api.ChannelsDeleteMessages(ctx, &tg.ChannelsDeleteMessagesRequest{
-				Channel: &tg.InputChannel{
-					ChannelID:  channelPeer.ChannelID,
-					AccessHash: channelPeer.AccessHash,
-				},
-				ID: ids,
-			})
-		} else {
-			_, err = api.MessagesDeleteMessages(ctx, &tg.MessagesDeleteMessagesRequest{
-				Revoke: true,
-				ID:     ids,
-			})
-		}
 
-		if err != nil {
-			return fmt.Errorf("failed to delete messages: %w", err)
+			if err != nil {
+				if d, ok := telegram.AsFloodWait(err); ok {
+					waitDur := d + time.Second
+					pterm.Warning.Printf("Rate limit hit (FLOOD_WAIT). Waiting %v before retrying...\n", waitDur)
+					time.Sleep(waitDur)
+					continue
+				}
+				return fmt.Errorf("failed to delete messages: %w", err)
+			}
+			break
 		}
 
 		totalDeleted += len(ids)
 		pterm.Info.Printf("Deleted %d messages so far...\n", totalDeleted)
 
-		// Small delay to avoid rate limiting
-		time.Sleep(500 * time.Millisecond)
+		// 1 second delay between batches to be respectful of Telegram rate limits
+		time.Sleep(1 * time.Second)
 	}
 
 	pterm.Success.Printf("Format complete! Deleted %d messages total.\n", totalDeleted)
