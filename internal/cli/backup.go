@@ -41,7 +41,7 @@ var backupCmd = &cobra.Command{
 			pterm.Error.Println("Failed to query database:", err)
 			return
 		}
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 
 		var entries []VfsBackupEntry
 		for rows.Next() {
@@ -90,11 +90,14 @@ var backupCmd = &cobra.Command{
 		encoder := json.NewEncoder(file)
 		encoder.SetIndent("", "  ")
 		if err := encoder.Encode(entries); err != nil {
-			file.Close()
+			_ = file.Close()
 			pterm.Error.Println("JSON encoding failed:", err)
 			return
 		}
-		file.Close()
+		if err := file.Close(); err != nil {
+			pterm.Error.Println("Failed to finalize backup file:", err)
+			return
+		}
 
 		pterm.Success.Printf("Backup generated locally (%d entries). Uploading to Telegram...\n", len(entries))
 

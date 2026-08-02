@@ -28,12 +28,9 @@ func InitConfig() error {
 	// Default to environment variables if present
 	viper.AutomaticEnv()
 
-	// It's okay if .env doesn't exist yet (e.g. first run)
-	if err := viper.ReadInConfig(); err != nil {
-		if !os.IsNotExist(err) {
-			// Ignore not-exist errors, we will prompt the user to configure later
-		}
-	}
+	// It's okay if .env doesn't exist yet (e.g. first run); the user
+	// will be prompted to configure later.
+	_ = viper.ReadInConfig()
 
 	if err := viper.Unmarshal(&AppConfig); err != nil {
 		return fmt.Errorf("failed to unmarshal config: %w", err)

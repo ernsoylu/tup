@@ -12,7 +12,7 @@ var RootCmd = &cobra.Command{
 You can copy, move, and remove files natively using standard POSIX semantics.
 Example: tup cp ~/file.txt work:/docs/`,
 	Run: func(cmd *cobra.Command, args []string) {
-		cmd.Help()
+		_ = cmd.Help()
 	},
 }
 

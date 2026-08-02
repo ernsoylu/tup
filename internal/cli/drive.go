@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"strings"
+
 	"github.com/ernsoylu/tup/internal/core"
 	"github.com/ernsoylu/tup/internal/telegram"
 	"github.com/pterm/pterm"
@@ -46,7 +48,7 @@ var driveListCmd = &cobra.Command{
 			pterm.Error.Println("Failed to fetch drives:", err)
 			return
 		}
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 
 		pterm.DefaultHeader.WithFullWidth().WithBackgroundStyle(pterm.NewStyle(pterm.BgCyan)).Println("Registered Drives")
 
@@ -63,11 +65,49 @@ var driveListCmd = &cobra.Command{
 			return
 		}
 
-		pterm.DefaultTable.WithHasHeader().WithData(tableData).Render()
+		_ = pterm.DefaultTable.WithHasHeader().WithData(tableData).Render()
+	},
+}
+
+var driveChatsCmd = &cobra.Command{
+	Use:   "chats",
+	Short: "List your Telegram chats with their IDs (for 'drive add')",
+	Run: func(cmd *cobra.Command, args []string) {
+		filter, _ := cmd.Flags().GetString("filter")
+
+		spinner, _ := pterm.DefaultSpinner.Start("Fetching chats from Telegram...")
+		dialogs, err := telegram.ListDialogs(cmd.Context())
+		if err != nil {
+			spinner.Fail("Failed to fetch chats: ", err)
+			return
+		}
+		_ = spinner.Stop()
+
+		tableData := pterm.TableData{{"Name", "Type", "Username", "Chat ID"}}
+		for _, d := range dialogs {
+			if filter != "" && !strings.Contains(strings.ToLower(d.Title), strings.ToLower(filter)) {
+				continue
+			}
+			username := d.Username
+			if username != "" {
+				username = "@" + username
+			}
+			tableData = append(tableData, []string{d.Title, d.Type, username, d.ChatID})
+		}
+
+		if len(tableData) == 1 {
+			pterm.Warning.Println("No chats matched.")
+			return
+		}
+
+		pterm.DefaultHeader.WithFullWidth().WithBackgroundStyle(pterm.NewStyle(pterm.BgCyan)).Println("Telegram Chats")
+		_ = pterm.DefaultTable.WithHasHeader().WithData(tableData).Render()
+		pterm.Info.Println("Register one with: tup drive add <alias> <chat_id>")
 	},
 }
 
 func init() {
-	driveCmd.AddCommand(driveAddCmd, driveListCmd)
+	driveChatsCmd.Flags().StringP("filter", "f", "", "filter chats by name (case-insensitive)")
+	driveCmd.AddCommand(driveAddCmd, driveListCmd, driveChatsCmd)
 	RootCmd.AddCommand(driveCmd)
 }

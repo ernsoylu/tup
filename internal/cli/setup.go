@@ -54,7 +54,10 @@ var loginCmd = &cobra.Command{
 		}
 
 		tupDir := filepath.Join(home, ".tup")
-		os.MkdirAll(tupDir, 0700)
+		if err := os.MkdirAll(tupDir, 0700); err != nil {
+			pterm.Error.Println("Failed to create config directory:", err)
+			return
+		}
 		envPath := filepath.Join(tupDir, ".env")
 
 		err = os.WriteFile(envPath, []byte(envContent), 0600)

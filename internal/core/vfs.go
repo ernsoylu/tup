@@ -61,7 +61,7 @@ func ListDirectory(alias string, parentID int) ([]VfsEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var entries []VfsEntry
 	for rows.Next() {

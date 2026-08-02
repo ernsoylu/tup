@@ -23,7 +23,7 @@ var updateCmd = &cobra.Command{
 			pterm.Error.Println("Failed to check for updates:", err)
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		var release struct {
 			TagName string `json:"tag_name"`
@@ -62,14 +62,14 @@ var updateCmd = &cobra.Command{
 		pterm.Info.Printf("Downloading %s...\n", release.TagName)
 
 		spinner, _ := pterm.DefaultSpinner.Start("Applying update...")
-		defer spinner.Stop()
+		defer func() { _ = spinner.Stop() }()
 
 		binResp, err := http.Get(downloadURL)
 		if err != nil {
 			spinner.Fail("Download failed: ", err)
 			return
 		}
-		defer binResp.Body.Close()
+		defer func() { _ = binResp.Body.Close() }()
 
 		err = selfupdate.Apply(binResp.Body, selfupdate.Options{})
 		if err != nil {

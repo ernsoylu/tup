@@ -42,6 +42,11 @@ func InitMTProto() error {
 
 // Run executes the given callback inside the active MTProto client connection.
 func Run(ctx context.Context, f func(ctx context.Context) error) error {
+	if Client == nil {
+		if err := InitMTProto(); err != nil {
+			return err
+		}
+	}
 	return Client.Run(ctx, func(ctx context.Context) error {
 		status, err := Client.Auth().Status(ctx)
 		if err != nil {
@@ -81,7 +86,7 @@ func UploadFileMTProto(ctx context.Context, localPath, chatIDStr string) error {
 		if err != nil {
 			return err
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 
 		upload, err := u.FromReader(ctx, localPath, f)
 		if err != nil {

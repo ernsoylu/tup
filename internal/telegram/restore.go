@@ -44,7 +44,7 @@ func SearchAndRestoreBackup(ctx context.Context, alias, chatIDStr string) error 
 		if err != nil {
 			return err
 		}
-		defer file.Close()
+		defer func() { _ = file.Close() }()
 
 		var entries []VfsBackupEntry
 		if err := json.NewDecoder(file).Decode(&entries); err != nil {
@@ -73,7 +73,7 @@ func restoreToDB(entries []VfsBackupEntry) error {
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, e := range entries {
 		var parentID interface{}
@@ -83,7 +83,7 @@ func restoreToDB(entries []VfsBackupEntry) error {
 
 		_, err = stmt.Exec(e.Alias, parentID, e.Name, e.IsDir, e.Size, e.Sha256, e.MessageID)
 		if err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			return fmt.Errorf("failed to insert entry %s: %w", e.Name, err)
 		}
 	}
