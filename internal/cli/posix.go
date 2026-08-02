@@ -78,8 +78,43 @@ var cpCmd = &cobra.Command{
 
 			pterm.Success.Printf("Uploaded %s to %s:/%s (Size: %d bytes)\n", srcInfo.Path, dstInfo.Alias, filename, st.Size())
 		} else if srcInfo.IsRemote && !dstInfo.IsRemote {
-			pterm.Info.Printf("Downloading %s:/%s to %s\n", srcInfo.Alias, srcInfo.Path, dstInfo.Path)
-			// telegram.DownloadFile(srcInfo.Alias, srcInfo.Path, dstInfo.Path) will be implemented here
+			entry, err := core.GetEntryByPath(srcInfo.Alias, srcInfo.Path)
+			if err != nil || entry == nil {
+				pterm.Error.Printf("File not found on remote drive: %s\n", srcInfo.Path)
+				return
+			}
+			if entry.IsDir {
+				pterm.Error.Println("Downloading directories is not supported yet.")
+				return
+			}
+
+			chatID, err := core.GetChatID(srcInfo.Alias)
+			if err != nil {
+				pterm.Error.Println("Failed to resolve drive alias:", err)
+				return
+			}
+
+			destPath := dstInfo.Path
+			if fi, err := os.Stat(destPath); err == nil && fi.IsDir() {
+				destPath = filepath.Join(destPath, entry.Name)
+			}
+
+			outFile, err := os.Create(destPath)
+			if err != nil {
+				pterm.Error.Println("Failed to create local file:", err)
+				return
+			}
+
+			pterm.Info.Printf("Downloading %s:/%s (%d bytes) to %s...\n", srcInfo.Alias, entry.Name, entry.Size, destPath)
+
+			err = telegram.DownloadFileMTProto(cmd.Context(), chatID, entry.MessageID, outFile)
+			_ = outFile.Close()
+			if err != nil {
+				pterm.Error.Println("Download failed:", err)
+				return
+			}
+
+			pterm.Success.Printf("Downloaded %s:/%s to %s\n", srcInfo.Alias, entry.Name, destPath)
 		} else if srcInfo.IsRemote && dstInfo.IsRemote {
 			pterm.Info.Printf("Remote Copy %s:/%s to %s:/%s\n", srcInfo.Alias, srcInfo.Path, dstInfo.Alias, dstInfo.Path)
 		} else {
@@ -225,7 +260,33 @@ var catCmd = &cobra.Command{
 	Short: "Print file contents to standard output",
 	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Printf("Streaming %v\n", args)
+		targetInfo := vfs.ParsePath(args[0])
+		if !targetInfo.IsRemote {
+			pterm.Error.Println("Use standard 'cat' for local files.")
+			return
+		}
+
+		entry, err := core.GetEntryByPath(targetInfo.Alias, targetInfo.Path)
+		if err != nil || entry == nil {
+			pterm.Error.Printf("File not found on remote drive: %s\n", targetInfo.Path)
+			return
+		}
+		if entry.IsDir {
+			pterm.Error.Printf("%s is a directory\n", targetInfo.Path)
+			return
+		}
+
+		chatID, err := core.GetChatID(targetInfo.Alias)
+		if err != nil {
+			pterm.Error.Println("Failed to resolve drive alias:", err)
+			return
+		}
+
+		err = telegram.DownloadFileMTProto(cmd.Context(), chatID, entry.MessageID, os.Stdout)
+		if err != nil {
+			pterm.Error.Println("Streaming failed:", err)
+			return
+		}
 	},
 }
 
