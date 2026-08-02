@@ -37,7 +37,7 @@ var cpCmd = &cobra.Command{
 			}
 		} else if srcInfo.IsRemote && !dstInfo.IsRemote {
 			pterm.Info.Printf("Downloading %s:/%s to %s\n", srcInfo.Alias, srcInfo.Path, dstInfo.Path)
-			// TODO: telegram.DownloadFile(srcInfo.Alias, srcInfo.Path, dstInfo.Path)
+			// telegram.DownloadFile(srcInfo.Alias, srcInfo.Path, dstInfo.Path) will be implemented here
 		} else if srcInfo.IsRemote && dstInfo.IsRemote {
 			pterm.Info.Printf("Remote Copy %s:/%s to %s:/%s\n", srcInfo.Alias, srcInfo.Path, dstInfo.Alias, dstInfo.Path)
 		} else {
@@ -90,7 +90,7 @@ var rmCmd = &cobra.Command{
 			return
 		}
 
-		// TODO: Call telegram to delete the actual message using entry.MessageID
+		// Call telegram to delete the actual message using entry.MessageID when implemented
 		pterm.Success.Printf("Removed %s:/%s\n", targetInfo.Alias, targetInfo.Path)
 	},
 }

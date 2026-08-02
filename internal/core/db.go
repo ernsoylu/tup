@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	// Import the modernc SQLite driver so database/sql can use it seamlessly
 	_ "modernc.org/sqlite"
 )
 

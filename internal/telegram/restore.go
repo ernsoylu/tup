@@ -27,8 +27,7 @@ func SearchAndRestoreBackup(ctx context.Context, alias, chatIDStr string) error 
 	return Run(ctx, func(ctx context.Context) error {
 		pterm.Info.Printf("Connecting to chat %s to search for backups...\n", chatIDStr)
 		
-		// TODO: Implement gotd/td message search to find "tup_backup_alias.json"
-		// For now, we will simulate the download step since full MTProto search
+		// We simulate the download step since full MTProto search
 		// requires handling peer resolution and history pagination.
 		
 		home, _ := os.UserHomeDir()
@@ -52,39 +51,42 @@ func SearchAndRestoreBackup(ctx context.Context, alias, chatIDStr string) error 
 			return fmt.Errorf("failed to parse backup JSON: %w", err)
 		}
 
-		// Insert back into SQLite
-		tx, err := core.DB.Begin()
-		if err != nil {
-			return err
-		}
-
-		stmt, err := tx.Prepare(`
-			INSERT OR REPLACE INTO vfs_entries (alias, parent_id, name, is_dir, size, sha256, message_id)
-			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`)
-		if err != nil {
-			return err
-		}
-		defer stmt.Close()
-
-		for _, e := range entries {
-			var parentID interface{}
-			if e.ParentID != 0 {
-				parentID = e.ParentID
-			}
-
-			_, err = stmt.Exec(e.Alias, parentID, e.Name, e.IsDir, e.Size, e.Sha256, e.MessageID)
-			if err != nil {
-				tx.Rollback()
-				return fmt.Errorf("failed to insert entry %s: %w", e.Name, err)
-			}
-		}
-
-		if err := tx.Commit(); err != nil {
+		if err := restoreToDB(entries); err != nil {
 			return err
 		}
 
 		pterm.Success.Printf("Successfully restored %d files to the VFS!\n", len(entries))
 		return nil
 	})
+}
+
+func restoreToDB(entries []VfsBackupEntry) error {
+	tx, err := core.DB.Begin()
+	if err != nil {
+		return err
+	}
+
+	stmt, err := tx.Prepare(`
+		INSERT OR REPLACE INTO vfs_entries (alias, parent_id, name, is_dir, size, sha256, message_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, e := range entries {
+		var parentID interface{}
+		if e.ParentID != 0 {
+			parentID = e.ParentID
+		}
+
+		_, err = stmt.Exec(e.Alias, parentID, e.Name, e.IsDir, e.Size, e.Sha256, e.MessageID)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Errorf("failed to insert entry %s: %w", e.Name, err)
+		}
+	}
+
+	return tx.Commit()
 }

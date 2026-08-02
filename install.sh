@@ -13,13 +13,13 @@ if command -v curl >/dev/null 2>&1; then
 elif command -v wget >/dev/null 2>&1; then
     RELEASE_DATA=$(wget -qO- $GITHUB_URL)
 else
-    echo "Error: curl or wget is required"
+    echo "Error: curl or wget is required" >&2
     exit 1
 fi
 
 VERSION=$(echo "$RELEASE_DATA" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
 if [ -z "$VERSION" ]; then
-    echo "Error: Could not determine latest version"
+    echo "Error: Could not determine latest version" >&2
     exit 1
 fi
 
