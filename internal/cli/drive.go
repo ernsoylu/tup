@@ -76,19 +76,24 @@ var driveChatsCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		filter, _ := cmd.Flags().GetString("filter")
 
-		// Ensure authentication finishes before starting any UI spinners
-		if err := telegram.Run(cmd.Context(), func(ctx context.Context) error { return nil }); err != nil {
-			pterm.Error.Println("Authentication failed:", err)
-			return
-		}
-
-		spinner, _ := pterm.DefaultSpinner.Start("Fetching chats from Telegram...")
-		dialogs, err := telegram.ListDialogs(cmd.Context())
+		var dialogs []telegram.DialogInfo
+		err := telegram.Run(cmd.Context(), func(ctx context.Context) error {
+			// Auth is already handled by Run() before we get here,
+			// so it's safe to start the spinner now.
+			spinner, _ := pterm.DefaultSpinner.Start("Fetching chats from Telegram...")
+			var fetchErr error
+			dialogs, fetchErr = telegram.FetchDialogs(ctx)
+			if fetchErr != nil {
+				spinner.Fail("Failed to fetch chats: ", fetchErr)
+				return fetchErr
+			}
+			_ = spinner.Stop()
+			return nil
+		})
 		if err != nil {
-			spinner.Fail("Failed to fetch chats: ", err)
+			pterm.Error.Println("Failed to fetch chats:", err)
 			return
 		}
-		_ = spinner.Stop()
 
 		tableData := pterm.TableData{{"Name", "Type", "Username", "Chat ID"}}
 		for _, d := range dialogs {
