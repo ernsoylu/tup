@@ -55,3 +55,17 @@ func InitDB() error {
 	DB = db
 	return nil
 }
+
+// GetChatID resolves a drive alias to its Telegram chat ID.
+func GetChatID(alias string) (string, error) {
+	var chatID string
+	err := DB.QueryRow("SELECT chat_id FROM drive_aliases WHERE alias = ?", alias).Scan(&chatID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("alias '%s' not found. Use 'tup drive add %s <chat_id>' first", alias, alias)
+		}
+		return "", err
+	}
+	return chatID, nil
+}
+

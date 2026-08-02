@@ -9,6 +9,9 @@ import (
 	"github.com/ernsoylu/tup/internal/core"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/session"
+	"github.com/gotd/td/telegram/message"
+	"github.com/gotd/td/telegram/uploader"
+	"github.com/pterm/pterm"
 )
 
 var Client *telegram.Client
@@ -40,14 +43,63 @@ func InitMTProto() error {
 // Run executes the given callback inside the active MTProto client connection.
 func Run(ctx context.Context, f func(ctx context.Context) error) error {
 	return Client.Run(ctx, func(ctx context.Context) error {
-		// Verify if the client is actually authorized
 		status, err := Client.Auth().Status(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to check auth status: %w", err)
 		}
+		
 		if !status.Authorized {
-			return fmt.Errorf("MTProto client is not authorized. Please run 'tup login'")
+			token := core.AppConfig.TelegramBotToken
+			if token == "" {
+				return fmt.Errorf("MTProto client is not authorized and TELEGRAM_BOT_TOKEN is missing")
+			}
+			
+			_, err = Client.Auth().Bot(ctx, token)
+			if err != nil {
+				return fmt.Errorf("bot login failed: %w", err)
+			}
 		}
+		
 		return f(ctx)
+	})
+}
+
+// UploadFileMTProto uploads a file using the MTProto 2GB engine.
+func UploadFileMTProto(ctx context.Context, localPath, chatIDStr string) error {
+	return Run(ctx, func(ctx context.Context) error {
+		api := Client.API()
+		sender := message.NewSender(api)
+		u := uploader.NewUploader(api)
+
+		pterm.Info.Printf("Resolving peer %s...\n", chatIDStr)
+		// Try resolving the peer
+		peer, err := sender.ResolveDomain(chatIDStr, message.ResolveOptions{})
+		if err != nil {
+			return fmt.Errorf("could not resolve chat: %w", err)
+		}
+
+		pterm.Info.Printf("Uploading %s to Telegram (up to 2GB)...\n", localPath)
+		
+		f, err := os.Open(localPath)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+
+		upload, err := u.FromReader(ctx, localPath, f)
+		if err != nil {
+			return fmt.Errorf("upload failed: %w", err)
+		}
+
+		pterm.Info.Println("Upload complete, finalizing message...")
+		
+		msg, err := sender.To(peer).Document(ctx, upload)
+		if err != nil {
+			return fmt.Errorf("failed to send document: %w", err)
+		}
+		
+		_ = msg
+		pterm.Success.Println("File sent to Telegram successfully!")
+		return nil
 	})
 }

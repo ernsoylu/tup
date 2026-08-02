@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/ernsoylu/tup/internal/core"
+	"github.com/ernsoylu/tup/internal/telegram"
+	"github.com/ernsoylu/tup/internal/vfs"
 	"github.com/pterm/pterm"
 	"github.com/spf13/cobra"
 )
@@ -15,12 +18,36 @@ var cpCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
 		pterm.DefaultHeader.WithFullWidth().WithBackgroundStyle(pterm.NewStyle(pterm.BgBlue)).Println("Tup Copy")
-		pterm.Info.Printf("Copying %s to %s\n", args[0], args[1])
+		
+		srcInfo := vfs.ParsePath(args[0])
+		dstInfo := vfs.ParsePath(args[1])
+
+		if !srcInfo.IsRemote && dstInfo.IsRemote {
+			pterm.Info.Printf("Uploading %s to %s:/%s\n", srcInfo.Path, dstInfo.Alias, dstInfo.Path)
+			chatID, err := core.GetChatID(dstInfo.Alias)
+			if err != nil {
+				pterm.Error.Println("Failed to resolve alias:", err)
+				return
+			}
+			err = telegram.UploadFileMTProto(cmd.Context(), srcInfo.Path, chatID)
+			if err != nil {
+				pterm.Error.Println("Upload failed:", err)
+				return
+			}
+		} else if srcInfo.IsRemote && !dstInfo.IsRemote {
+			pterm.Info.Printf("Downloading %s:/%s to %s\n", srcInfo.Alias, srcInfo.Path, dstInfo.Path)
+			// TODO: telegram.DownloadFile(srcInfo.Alias, srcInfo.Path, dstInfo.Path)
+		} else if srcInfo.IsRemote && dstInfo.IsRemote {
+			pterm.Info.Printf("Remote Copy %s:/%s to %s:/%s\n", srcInfo.Alias, srcInfo.Path, dstInfo.Alias, dstInfo.Path)
+		} else {
+			pterm.Error.Println("Local to local copies are not supported by tup. Use standard 'cp'.")
+			return
+		}
 
 		// Simulate file transfer with a beautiful progress bar
 		p, _ := pterm.DefaultProgressbar.WithTotal(100).WithTitle("Transferring...").Start()
 		for i := 0; i < p.Total; i++ {
-			p.Title = fmt.Sprintf("Uploading chunk %d", i)
+			p.Title = fmt.Sprintf("Processing chunk %d", i)
 			p.Increment()
 			time.Sleep(time.Millisecond * 20)
 		}
