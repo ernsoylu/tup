@@ -31,7 +31,6 @@ dist-bin/
 # Local test artifacts
 *.bin
 small_test.txt
-test/
 
 # Compiled binary
 /tup
