@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"github.com/ernsoylu/tup/internal/core"
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
-	"github.com/gotd/td/telegram/message"
 	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
 	"github.com/pterm/pterm"
@@ -94,16 +94,63 @@ func (termAuth) Code(ctx context.Context, sentCode *tg.AuthSentCode) (string, er
 	return code, nil
 }
 
+// resolvePeer converts a Bot API style chat ID string to a tg.InputPeerClass.
+// Channel/supergroup IDs use the -100 prefix convention.
+func resolvePeer(ctx context.Context, api *tg.Client, chatIDStr string) (tg.InputPeerClass, error) {
+	id, err := strconv.ParseInt(chatIDStr, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid chat ID %q: %w", chatIDStr, err)
+	}
+
+	switch {
+	case id > 0:
+		// User peer
+		return &tg.InputPeerUser{UserID: id}, nil
+
+	case id > -1000000000000:
+		// Regular group chat
+		return &tg.InputPeerChat{ChatID: -id}, nil
+
+	default:
+		// Channel or supergroup (Bot API -100 prefix)
+		channelID := -(id + 1000000000000)
+
+		// We need the access_hash, so resolve via channels.GetChannels
+		res, err := api.ChannelsGetChannels(ctx, []tg.InputChannelClass{
+			&tg.InputChannel{ChannelID: channelID},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve channel %d: %w", channelID, err)
+		}
+
+		chats := res.GetChats()
+		if len(chats) == 0 {
+			return nil, fmt.Errorf("channel %d not found", channelID)
+		}
+
+		channel, ok := chats[0].(*tg.Channel)
+		if !ok {
+			return nil, fmt.Errorf("resolved peer is not a channel")
+		}
+
+		return &tg.InputPeerChannel{
+			ChannelID:  channel.ID,
+			AccessHash: channel.AccessHash,
+		}, nil
+	}
+}
+
 // UploadFileMTProto uploads a file using the MTProto 2GB engine.
 func UploadFileMTProto(ctx context.Context, localPath, chatIDStr string) error {
 	return Run(ctx, func(ctx context.Context) error {
 		api := Client.API()
-		sender := message.NewSender(api)
 		u := uploader.NewUploader(api)
 
 		pterm.Info.Printf("Resolving peer %s...\n", chatIDStr)
-		// Try resolving the peer
-		req := sender.Resolve(chatIDStr)
+		peer, err := resolvePeer(ctx, api, chatIDStr)
+		if err != nil {
+			return fmt.Errorf("peer resolution failed: %w", err)
+		}
 
 		pterm.Info.Printf("Uploading %s to Telegram (up to 2GB)...\n", localPath)
 
@@ -120,13 +167,22 @@ func UploadFileMTProto(ctx context.Context, localPath, chatIDStr string) error {
 
 		pterm.Info.Println("Upload complete, finalizing message...")
 
-		msg, err := req.File(ctx, upload)
+		_, err = api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+			Peer: peer,
+			Media: &tg.InputMediaUploadedDocument{
+				File:     upload,
+				MimeType: "application/octet-stream",
+				Attributes: []tg.DocumentAttributeClass{
+					&tg.DocumentAttributeFilename{FileName: filepath.Base(localPath)},
+				},
+			},
+		})
 		if err != nil {
 			return fmt.Errorf("failed to send document: %w", err)
 		}
 
-		_ = msg
 		pterm.Success.Println("File sent to Telegram successfully!")
 		return nil
 	})
 }
+
