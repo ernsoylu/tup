@@ -9,8 +9,10 @@ import (
 	"github.com/ernsoylu/tup/internal/core"
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
+	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/telegram/message"
 	"github.com/gotd/td/telegram/uploader"
+	"github.com/gotd/td/tg"
 	"github.com/pterm/pterm"
 )
 
@@ -54,19 +56,42 @@ func Run(ctx context.Context, f func(ctx context.Context) error) error {
 		}
 
 		if !status.Authorized {
-			token := core.AppConfig.TelegramBotToken
-			if token == "" {
-				return fmt.Errorf("MTProto client is not authorized and TELEGRAM_BOT_TOKEN is missing")
+			pterm.Info.Println("Not authorized, starting user login flow...")
+			flow := auth.NewFlow(termAuth{}, auth.SendCodeOptions{})
+			if err := Client.Auth().IfNecessary(ctx, flow); err != nil {
+				return fmt.Errorf("user login failed: %w", err)
 			}
-
-			_, err = Client.Auth().Bot(ctx, token)
-			if err != nil {
-				return fmt.Errorf("bot login failed: %w", err)
-			}
+			pterm.Success.Println("User login successful!")
 		}
 
 		return f(ctx)
 	})
+}
+
+// termAuth implements the auth.UserAuthenticator interface using pterm
+type termAuth struct{}
+
+func (termAuth) Phone(ctx context.Context) (string, error) {
+	phone, _ := pterm.DefaultInteractiveTextInput.WithDefaultText("Enter your phone number (e.g. +1234567890)").Show()
+	return phone, nil
+}
+
+func (termAuth) Password(ctx context.Context) (string, error) {
+	pass, _ := pterm.DefaultInteractiveTextInput.WithDefaultText("Enter your 2FA password").WithMask("*").Show()
+	return pass, nil
+}
+
+func (termAuth) AcceptTermsOfService(ctx context.Context, tos tg.HelpTermsOfService) error {
+	return nil
+}
+
+func (termAuth) SignUp(ctx context.Context) (auth.UserInfo, error) {
+	return auth.UserInfo{}, fmt.Errorf("sign up not supported via tup CLI")
+}
+
+func (termAuth) Code(ctx context.Context, sentCode *tg.AuthSentCode) (string, error) {
+	code, _ := pterm.DefaultInteractiveTextInput.WithDefaultText("Enter the code sent to your Telegram").Show()
+	return code, nil
 }
 
 // UploadFileMTProto uploads a file using the MTProto 2GB engine.

@@ -9,9 +9,8 @@ import (
 )
 
 type Config struct {
-	TelegramBotToken string `mapstructure:"TELEGRAM_BOT_TOKEN"`
-	TelegramAPIID    int    `mapstructure:"TELEGRAM_API_ID"`
-	TelegramAPIHash  string `mapstructure:"TELEGRAM_API_HASH"`
+	TelegramAPIID   int    `mapstructure:"TELEGRAM_API_ID"`
+	TelegramAPIHash string `mapstructure:"TELEGRAM_API_HASH"`
 }
 
 var AppConfig Config
