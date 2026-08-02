@@ -1,101 +1,74 @@
 # tup
 
-Turn Telegram chats, groups, and channels into S3-style cloud storage drives with a
-POSIX-like virtual filesystem (VFS).
+`tup` treats Telegram chats and channels like a POSIX-compatible Virtual File System (VFS). With `tup`, you can use standard terminal commands (`cp`, `mv`, `rm`, `ls`) to manage remote files with native 2GB MTProto streaming bandwidth.
 
-## Install
+## Features
 
-**Quick Install (macOS / Linux)**:
+- **POSIX Interface**: Use `tup cp`, `tup ls`, `tup rm`, `tup mkdir` exactly as you would natively.
+- **Native 2GB Support**: Utilizes the `gotd/td` MTProto client to unlock Telegram's native 2GB file upload limits.
+- **VFS Backups**: Safely backup your drive's index into a JSON file embedded right in the chat.
+- **Instant Restore**: Connect to an existing drive on a new device, and it will auto-restore the VFS from the chat history.
+- **AI Ready**: Run `tup ai` to generate instructions that teach LLMs (Cursor, Claude, Copilot, Antigravity) how to interact with your cloud files natively.
+
+## Installation
+
+Install via curl:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ernsoylu/tup/main/install.sh | sh
 ```
 
-*(Windows: Download the `.zip` from the [releases page](../../releases), extract it, and run `install.ps1`)*
+Or download the binary directly from [Releases](https://github.com/ernsoylu/tup/releases).
 
-**From source**:
+## Getting Started
 
+### 1. Login
+
+Run the interactive setup to configure your Telegram API credentials:
 ```bash
-uv sync --all-extras
-uv run tup setup          # interactive wizard: validates your bot token live
+tup login
+```
+*Note: We highly recommend MTProto (2GB) mode. You will need your `API_ID` and `API_HASH` from [my.telegram.org](https://my.telegram.org).*
+
+### 2. Register a Drive
+
+Register any Telegram Chat ID as an alias:
+```bash
+tup drive add work <chat_id>
+```
+*(If a backup exists in this chat, `tup` will automatically restore your virtual file system cache!)*
+
+### 3. Use POSIX Commands
+
+Now, just use standard syntax:
+```bash
+# Upload a file to Telegram
+tup cp ./local-report.pdf work:/docs/report.pdf
+
+# List remote files
+tup ls work:/docs
+
+# Download a file
+tup cp work:/docs/report.pdf ./downloaded.pdf
+
+# Delete a remote file
+tup rm work:/docs/report.pdf
 ```
 
-First run without configuration opens the setup wizard (`tup setup` in the terminal, or
-a graphical wizard when launching `tup gui`). It walks you through the @BotFather bot
-token and the my.telegram.org API ID/hash needed for 2 GB uploads. Configuration lands
-in `~/.tup/.env` with `0600` permissions; the SQLite index lives at `~/.tup/registry.db`.
+## Updates
 
-## Usage
-
+`tup` comes with a built-in self-updater. Just run:
 ```bash
-# Drives (chat aliases)
-tup chat add work -1001234567890
-tup chat list
-tup chat remove work
-
-# Uploads
-tup up report.pdf --to work --dest /docs
-tup report.pdf                  # shortcut: unknown tokens fall through to `up`
-tup up ./photos --to work      # a folder mounts under its own name: /photos/
-
-# Browse & manage the VFS (local index, instant)
-tup tree work
-tup ls work /docs -R
-tup mkdir work /inbox
-tup cp work /docs/report.pdf /archive/     # server-side copy, no re-upload
-tup mv work /docs/report.pdf /archive/     # path move only (no renames)
-tup rm work /archive/report.pdf            # → Recycle Bin (/.Trash/); --force purges
-tup trash list work                        # list / restore / empty the bin
-tup rmdir work /inbox
-
-# Captions, tags, editing & versions
-tup caption work /docs/report.pdf "Q3 numbers #finance #q3"
-tup tag work /docs/report.pdf urgent       # append a hashtag
-tup ls work --tag finance                  # drive-wide tag filter
-tup edit work /notes/todo.md               # $EDITOR round-trip; old revision kept
-tup versions work /notes/todo.md           # history; --restore <id> brings one back
-
-# Backups (gzipped-JSON registry dump stored on the drive itself)
-tup backup work                            # → /Backups/tup-backup-<stamp>.json.gz
-tup backup work --restore /Backups/tup-backup-20260721-120000.json.gz
-
-# Sync & reconcile
-tup sync ./backup work /backup             # skips files whose SHA-256 already matches
-tup index work --reconstruct
-
-# Failures & audit
-tup failed
-tup retry
-tup logs --limit 50 --chat work
+tup update
 ```
-
-## Behavior notes
-
-- **One upload transport: MTProto.** All uploads and server-side copies go through
-  Telethon (MTProto) using your bot token plus `TELEGRAM_API_ID`/`TELEGRAM_API_HASH`
-  from https://my.telegram.org — uniform 2 GB cap, no local Bot API server, no Docker.
-  The Bot API is still used internally for metadata (chat validation, caption edits,
-  deletes, update draining).
-- **Media stays browsable.** Images, videos, and audio are detected by magic bytes and
-  sent as native media (videos with streaming support), so they appear in Telegram's
-  media gallery. Use `--as-doc` to force original-quality document uploads
-  (note: Telegram recompresses photos sent as photos).
-- **`tup <path>` fallback.** Unknown first tokens are routed to `tup up`. Known command
-  names always win — to upload a file literally named `tree`, use `tup up tree`.
-- **`mv` is path-only.** Telegram fixes a file's download name at upload time; `mv`
-  updates the virtual path (DB + remote caption) but cannot rename the file.
-- **`tup index` limitation.** The Bot API has no message-history endpoint, so `index`
-  can only drain pending updates (`getUpdates`) — it applies native caption edits and,
-  with `--reconstruct`, indexes tup-captioned messages it hasn't seen. It cannot scan
-  arbitrary old history.
+It will automatically fetch and install the latest binary from GitHub!
 
 ## Development
 
-```bash
-uv run pytest             # full suite (Telegram API fully mocked — never hits the network)
-uv run ruff check .
-uv run ruff format .
-uv run mypy src tests
-```
+Built natively in Go using `cobra` and `gotd/td`.
 
-See `CLAUDE.md` for the full architecture specification.
+```bash
+git clone https://github.com/ernsoylu/tup
+cd tup
+go build ./cmd/tup
+```
