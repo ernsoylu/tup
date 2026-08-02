@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -23,6 +24,14 @@ func ListDialogs(ctx context.Context) ([]DialogInfo, error) {
 
 	err := Run(ctx, func(ctx context.Context) error {
 		api := Client.API()
+
+		status, err := Client.Auth().Status(ctx)
+		if err != nil {
+			return err
+		}
+		if status.User != nil && status.User.Bot {
+			return fmt.Errorf("bot accounts cannot list chats directly. Please invite your bot to a group/channel and use the Chat ID, or use user login")
+		}
 
 		res, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
 			OffsetPeer: &tg.InputPeerEmpty{},
