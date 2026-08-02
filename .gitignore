@@ -27,3 +27,8 @@ htmlcov/
 *.swp
 .DS_Store
 dist-bin/
+
+# Local test artifacts
+*.bin
+small_test.txt
+test/
