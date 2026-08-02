@@ -102,7 +102,7 @@ var backupCmd = &cobra.Command{
 		pterm.Success.Printf("Backup generated locally (%d entries). Uploading to Telegram...\n", len(entries))
 
 		// Upload back to the drive's chat
-		err = telegram.UploadFileMTProto(cmd.Context(), backupFile, chatID)
+		_, err = telegram.UploadFileMTProto(cmd.Context(), backupFile, chatID)
 		if err != nil {
 			pterm.Error.Println("Upload failed:", err)
 			return

@@ -142,9 +142,10 @@ func resolvePeer(ctx context.Context, api *tg.Client, chatIDStr string) (tg.Inpu
 	}
 }
 
-// UploadFileMTProto uploads a file using the MTProto 2GB engine.
-func UploadFileMTProto(ctx context.Context, localPath, chatIDStr string) error {
-	return Run(ctx, func(ctx context.Context) error {
+// UploadFileMTProto uploads a file using the MTProto 2GB engine and returns its Telegram Message ID.
+func UploadFileMTProto(ctx context.Context, localPath, chatIDStr string) (int, error) {
+	var msgID int
+	err := Run(ctx, func(ctx context.Context) error {
 		api := Client.API()
 		u := uploader.NewUploader(api)
 
@@ -173,7 +174,7 @@ func UploadFileMTProto(ctx context.Context, localPath, chatIDStr string) error {
 		_, _ = crand.Read(randBuf[:])
 		randomID := int64(binary.LittleEndian.Uint64(randBuf[:]))
 
-		_, err = api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+		updates, err := api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
 			Peer:     peer,
 			RandomID: randomID,
 			Media: &tg.InputMediaUploadedDocument{
@@ -188,8 +189,27 @@ func UploadFileMTProto(ctx context.Context, localPath, chatIDStr string) error {
 			return fmt.Errorf("failed to send document: %w", err)
 		}
 
+		switch u := updates.(type) {
+		case *tg.Updates:
+			for _, update := range u.Updates {
+				if newMsg, ok := update.(*tg.UpdateNewMessage); ok {
+					msgID = newMsg.Message.GetID()
+				} else if newChannelMsg, ok := update.(*tg.UpdateNewChannelMessage); ok {
+					msgID = newChannelMsg.Message.GetID()
+				}
+			}
+		case *tg.UpdatesCombined:
+			for _, update := range u.Updates {
+				if newMsg, ok := update.(*tg.UpdateNewMessage); ok {
+					msgID = newMsg.Message.GetID()
+				} else if newChannelMsg, ok := update.(*tg.UpdateNewChannelMessage); ok {
+					msgID = newChannelMsg.Message.GetID()
+				}
+			}
+		}
+
 		pterm.Success.Println("File sent to Telegram successfully!")
 		return nil
 	})
+	return msgID, err
 }
-

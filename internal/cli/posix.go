@@ -2,8 +2,9 @@ package cli
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/ernsoylu/tup/internal/core"
 	"github.com/ernsoylu/tup/internal/telegram"
@@ -24,17 +25,58 @@ var cpCmd = &cobra.Command{
 		dstInfo := vfs.ParsePath(args[1])
 
 		if !srcInfo.IsRemote && dstInfo.IsRemote {
+			st, err := os.Stat(srcInfo.Path)
+			if err != nil {
+				pterm.Error.Println("Local file not found:", err)
+				return
+			}
+
 			pterm.Info.Printf("Uploading %s to %s:/%s\n", srcInfo.Path, dstInfo.Alias, dstInfo.Path)
 			chatID, err := core.GetChatID(dstInfo.Alias)
 			if err != nil {
 				pterm.Error.Println("Failed to resolve alias:", err)
 				return
 			}
-			err = telegram.UploadFileMTProto(cmd.Context(), srcInfo.Path, chatID)
+
+			msgID, err := telegram.UploadFileMTProto(cmd.Context(), srcInfo.Path, chatID)
 			if err != nil {
 				pterm.Error.Println("Upload failed:", err)
 				return
 			}
+
+			// Determine target file name and parent directory ID
+			cleanDst := strings.TrimSuffix(dstInfo.Path, "/")
+			filename := filepath.Base(cleanDst)
+			parentPath := filepath.Dir(cleanDst)
+
+			// If destination path is root or ends with slash, use local filename
+			if dstInfo.Path == "/" || strings.HasSuffix(dstInfo.Path, "/") || filename == "." || filename == "/" {
+				filename = filepath.Base(srcInfo.Path)
+				parentPath = dstInfo.Path
+			}
+
+			parentID := 0
+			if parentPath != "/" && parentPath != "" && parentPath != "." {
+				parentEntry, err := core.GetEntryByPath(dstInfo.Alias, parentPath)
+				if err == nil && parentEntry != nil {
+					parentID = parentEntry.ID
+				}
+			}
+
+			err = core.InsertEntry(core.VfsEntry{
+				Alias:     dstInfo.Alias,
+				ParentID:  parentID,
+				Name:      filename,
+				IsDir:     false,
+				Size:      st.Size(),
+				MessageID: msgID,
+			})
+			if err != nil {
+				pterm.Error.Println("Failed to record file in VFS:", err)
+				return
+			}
+
+			pterm.Success.Printf("Uploaded %s to %s:/%s (Size: %d bytes)\n", srcInfo.Path, dstInfo.Alias, filename, st.Size())
 		} else if srcInfo.IsRemote && !dstInfo.IsRemote {
 			pterm.Info.Printf("Downloading %s:/%s to %s\n", srcInfo.Alias, srcInfo.Path, dstInfo.Path)
 			// telegram.DownloadFile(srcInfo.Alias, srcInfo.Path, dstInfo.Path) will be implemented here
@@ -44,15 +86,6 @@ var cpCmd = &cobra.Command{
 			pterm.Error.Println("Local to local copies are not supported by tup. Use standard 'cp'.")
 			return
 		}
-
-		// Simulate file transfer with a beautiful progress bar
-		p, _ := pterm.DefaultProgressbar.WithTotal(100).WithTitle("Transferring...").Start()
-		for i := 0; i < p.Total; i++ {
-			p.Title = fmt.Sprintf("Processing chunk %d", i)
-			p.Increment()
-			time.Sleep(time.Millisecond * 20)
-		}
-		pterm.Success.Println("Transfer complete!")
 	},
 }
 
