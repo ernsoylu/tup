@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"strings"
 
 	"github.com/ernsoylu/tup/internal/core"
@@ -74,6 +75,12 @@ var driveChatsCmd = &cobra.Command{
 	Short: "List your Telegram chats with their IDs (for 'drive add')",
 	Run: func(cmd *cobra.Command, args []string) {
 		filter, _ := cmd.Flags().GetString("filter")
+
+		// Ensure authentication finishes before starting any UI spinners
+		if err := telegram.Run(cmd.Context(), func(ctx context.Context) error { return nil }); err != nil {
+			pterm.Error.Println("Authentication failed:", err)
+			return
+		}
 
 		spinner, _ := pterm.DefaultSpinner.Start("Fetching chats from Telegram...")
 		dialogs, err := telegram.ListDialogs(cmd.Context())
