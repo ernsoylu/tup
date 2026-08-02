@@ -13,6 +13,7 @@ import (
 )
 
 type VfsBackupEntry struct {
+	ID        int    `json:"id,omitempty"`
 	Alias     string `json:"alias"`
 	ParentID  int    `json:"parent_id"`
 	Name      string `json:"name"`
@@ -36,7 +37,7 @@ var backupCmd = &cobra.Command{
 			return
 		}
 
-		rows, err := core.DB.Query("SELECT alias, parent_id, name, is_dir, size, sha256, message_id FROM vfs_entries WHERE alias = ?", alias)
+		rows, err := core.DB.Query("SELECT id, alias, parent_id, name, is_dir, size, sha256, message_id FROM vfs_entries WHERE alias = ?", alias)
 		if err != nil {
 			pterm.Error.Println("Failed to query database:", err)
 			return
@@ -49,7 +50,7 @@ var backupCmd = &cobra.Command{
 			var parentID, size, msgID interface{}
 			var sha256 interface{}
 
-			err = rows.Scan(&e.Alias, &parentID, &e.Name, &e.IsDir, &size, &sha256, &msgID)
+			err = rows.Scan(&e.ID, &e.Alias, &parentID, &e.Name, &e.IsDir, &size, &sha256, &msgID)
 			if err != nil {
 				pterm.Error.Println("Row scan error:", err)
 				return

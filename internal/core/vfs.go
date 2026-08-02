@@ -1,6 +1,7 @@
 package core
 
 import (
+	"database/sql"
 	"fmt"
 	"path"
 	"strings"
@@ -34,12 +35,22 @@ func GetEntryByPath(alias, remotePath string) (*VfsEntry, error) {
 		}
 
 		var entry VfsEntry
-		err := DB.QueryRow(`
-			SELECT id, alias, parent_id, name, is_dir, size, sha256, message_id 
-			FROM vfs_entries 
-			WHERE alias = ? AND parent_id = ? AND name = ?`,
-			alias, parentID, part).
-			Scan(&entry.ID, &entry.Alias, &entry.ParentID, &entry.Name, &entry.IsDir, &entry.Size, &entry.Sha256, &entry.MessageID)
+		var err error
+		if parentID == 0 {
+			err = DB.QueryRow(`
+				SELECT id, alias, COALESCE(parent_id, 0), name, is_dir, size, sha256, message_id 
+				FROM vfs_entries 
+				WHERE alias = ? AND (parent_id = 0 OR parent_id IS NULL) AND name = ?`,
+				alias, part).
+				Scan(&entry.ID, &entry.Alias, &entry.ParentID, &entry.Name, &entry.IsDir, &entry.Size, &entry.Sha256, &entry.MessageID)
+		} else {
+			err = DB.QueryRow(`
+				SELECT id, alias, COALESCE(parent_id, 0), name, is_dir, size, sha256, message_id 
+				FROM vfs_entries 
+				WHERE alias = ? AND parent_id = ? AND name = ?`,
+				alias, parentID, part).
+				Scan(&entry.ID, &entry.Alias, &entry.ParentID, &entry.Name, &entry.IsDir, &entry.Size, &entry.Sha256, &entry.MessageID)
+		}
 
 		if err != nil {
 			return nil, fmt.Errorf("path not found: %s", remotePath)
@@ -60,7 +71,7 @@ func GetEntryByPath(alias, remotePath string) (*VfsEntry, error) {
 func GetEntryByID(id int) (*VfsEntry, error) {
 	var entry VfsEntry
 	err := DB.QueryRow(`
-		SELECT id, alias, parent_id, name, is_dir, size, sha256, message_id
+		SELECT id, alias, COALESCE(parent_id, 0), name, is_dir, size, sha256, message_id
 		FROM vfs_entries WHERE id = ?`, id).
 		Scan(&entry.ID, &entry.Alias, &entry.ParentID, &entry.Name, &entry.IsDir, &entry.Size, &entry.Sha256, &entry.MessageID)
 	if err != nil {
@@ -71,11 +82,21 @@ func GetEntryByID(id int) (*VfsEntry, error) {
 
 // ListDirectory returns all children for a given parent ID.
 func ListDirectory(alias string, parentID int) ([]VfsEntry, error) {
-	rows, err := DB.Query(`
-		SELECT id, alias, parent_id, name, is_dir, size, sha256, message_id 
-		FROM vfs_entries 
-		WHERE alias = ? AND parent_id = ?
-		ORDER BY is_dir DESC, name ASC`, alias, parentID)
+	var rows *sql.Rows
+	var err error
+	if parentID == 0 {
+		rows, err = DB.Query(`
+			SELECT id, alias, COALESCE(parent_id, 0), name, is_dir, size, sha256, message_id 
+			FROM vfs_entries 
+			WHERE alias = ? AND (parent_id = 0 OR parent_id IS NULL)
+			ORDER BY is_dir DESC, name ASC`, alias)
+	} else {
+		rows, err = DB.Query(`
+			SELECT id, alias, COALESCE(parent_id, 0), name, is_dir, size, sha256, message_id 
+			FROM vfs_entries 
+			WHERE alias = ? AND parent_id = ?
+			ORDER BY is_dir DESC, name ASC`, alias, parentID)
+	}
 	if err != nil {
 		return nil, err
 	}
