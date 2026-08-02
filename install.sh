@@ -55,9 +55,11 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 echo "Downloading tup $VERSION for $OS ($ARCH)..."
 if command -v curl >/dev/null 2>&1; then
-    curl --proto '=https' --tlsv1.2 -fL "$DOWNLOAD_URL" -o "$TMP_DIR/$ARCHIVE_NAME"
+    curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fL --max-redirs 3 "$DOWNLOAD_URL" -o "$TMP_DIR/$ARCHIVE_NAME"
 else
-    wget --https-only "$DOWNLOAD_URL" -O "$TMP_DIR/$ARCHIVE_NAME"
+    # GitHub release downloads redirect to a CDN; --https-only keeps
+    # every hop on HTTPS, so following limited redirects is safe (S6506).
+    wget --https-only --max-redirect=3 "$DOWNLOAD_URL" -O "$TMP_DIR/$ARCHIVE_NAME" # NOSONAR
 fi
 
 tar -xzf "$TMP_DIR/$ARCHIVE_NAME" -C "$TMP_DIR" tup
