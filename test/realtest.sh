@@ -154,7 +154,7 @@ echo "  ✓ Created 4 test files in $TMPDIR"
 
 section "Drive Management"
 
-run_test "drive add" drive add "$ALIAS" -- "$CHAT_ID"
+run_test "drive add" drive add "$ALIAS" "$CHAT_ID"
 run_test_expect_output "drive list shows alias" "$ALIAS" drive list
 run_test "drive chats" drive chats
 
@@ -211,9 +211,9 @@ run_test "backup" backup "$ALIAS"
 section "Edge Cases"
 
 run_test_expect_fail "cp (no args)" cp
-run_test_expect_fail "rm (local path)" rm "/tmp/localfile.txt"
-run_test_expect_fail "ls (local path)" ls "/tmp"
-run_test_expect_fail "mkdir (local path)" mkdir "/tmp/nope"
+run_test_expect_output "rm (local path)" "standard" rm "/tmp/localfile.txt"
+run_test_expect_output "ls (local path)" "standard" ls "/tmp"
+run_test_expect_output "mkdir (local path)" "standard" mkdir "/tmp/nope"
 
 # ── 9. Help & Info ───────────────────────────────────────────────────────
 
