@@ -23,6 +23,9 @@ FAILED=0
 SKIPPED=0
 SECTION=""
 
+# All test paths live under this prefix so the rest of the drive is untouched
+ROOT=""
+
 # ── Colours ────────────────────────────────────────────────────────────────
 
 RED='\033[0;31m'
@@ -71,11 +74,12 @@ run_test_expect_output() {
     printf "  %-50s " "$label"
 
     output=$($TUP_CMD "$@" 2>&1)
+    rc=$?
     if echo "$output" | grep -qi "$expect"; then
         echo -e "${GREEN}PASS${RESET}"
         PASSED=$((PASSED + 1))
     else
-        echo -e "${RED}FAIL${RESET} (expected '$expect')"
+        echo -e "${RED}FAIL${RESET} (expected '$expect', rc=$rc)"
         echo "$output" | sed 's/^/    │ /'
         FAILED=$((FAILED + 1))
     fi
@@ -113,14 +117,12 @@ banner "TUP End-to-End Test Suite"
 echo ""
 echo -e "  Binary:  ${BOLD}$TUP_CMD${RESET}"
 
-# Check binary exists
 if [ ! -f "$TUP_CMD" ] && ! command -v "$TUP_CMD" &>/dev/null; then
     echo -e "  ${RED}Error: '$TUP_CMD' not found.${RESET}"
     echo "  Build it first: go build -o tup ./cmd/tup"
     exit 1
 fi
 
-# Get alias and chat ID from args or prompt
 if [ -n "$1" ] && [ -n "$2" ]; then
     ALIAS="$1"
     CHAT_ID="$2"
@@ -133,8 +135,11 @@ else
     read -rp "  Chat ID (e.g. -1004342175024): " CHAT_ID
 fi
 
+ROOT="$ALIAS:/_e2e"
+
 echo -e "  Alias:   ${BOLD}$ALIAS${RESET}"
 echo -e "  Chat ID: ${BOLD}$CHAT_ID${RESET}"
+echo -e "  Sandbox: ${BOLD}$ROOT${RESET}"
 echo ""
 
 # ── Create test fixtures ──────────────────────────────────────────────────
@@ -144,7 +149,12 @@ echo "Hello from tup realtest!" > "$TMPDIR/small.txt"
 dd if=/dev/urandom of="$TMPDIR/medium.bin" bs=1024 count=512 2>/dev/null  # 512KB
 echo '{"test": true, "items": [1,2,3]}' > "$TMPDIR/test.json"
 echo "# Test Markdown" > "$TMPDIR/test.md"
-echo "  ✓ Created 4 test files in $TMPDIR"
+mkdir -p "$TMPDIR/nested/sub"
+echo "nested file" > "$TMPDIR/nested/sub/deep.txt"
+echo "  ✓ Created fixtures in $TMPDIR"
+
+# Clean any leftover sandbox from a previous run
+$TUP_CMD rm -rf "$ROOT" >/dev/null 2>&1 || true
 
 # ══════════════════════════════════════════════════════════════════════════
 # TEST SECTIONS
@@ -162,51 +172,103 @@ run_test "drive chats" drive chats
 
 section "Directory Operations"
 
-run_test "mkdir (root dir)" mkdir "$ALIAS:/test_dir"
-run_test "mkdir (nested dir)" mkdir "$ALIAS:/uploads"
-run_test "ls (root)" ls "$ALIAS:/"
+run_test "mkdir -p sandbox" mkdir -p "$ROOT"
+run_test "mkdir (child)" mkdir "$ROOT/test_dir"
+run_test "mkdir -p nested" mkdir -p "$ROOT/uploads/a/b"
+run_test_expect_fail "mkdir without -p missing parent" mkdir "$ROOT/missing/parent/child"
+run_test "ls root sandbox" ls "$ROOT"
+run_test "ls -l" ls -l "$ROOT"
+run_test "ls -lH" ls -lH "$ROOT"
+run_test "ls -R" ls -R "$ROOT"
+run_test "tree sandbox" tree "$ROOT"
+run_test_expect_output "tree --json" '"type"' tree --json "$ROOT"
+run_test_expect_output "tree path --json" '"summary"' tree "$ROOT" --json
 
 # ── 3. File Upload (cp local → remote) ──────────────────────────────────
 
 section "File Upload"
 
-run_test "cp small.txt" cp "$TMPDIR/small.txt" "$ALIAS:/small.txt"
-run_test "cp medium.bin" cp "$TMPDIR/medium.bin" "$ALIAS:/medium.bin"
-run_test "cp test.json" cp "$TMPDIR/test.json" "$ALIAS:/test.json"
-run_test "cp test.md" cp "$TMPDIR/test.md" "$ALIAS:/test.md"
+run_test "cp small.txt" cp "$TMPDIR/small.txt" "$ROOT/small.txt"
+run_test "cp medium.bin" cp "$TMPDIR/medium.bin" "$ROOT/medium.bin"
+run_test "cp test.json" cp "$TMPDIR/test.json" "$ROOT/test.json"
+run_test "cp test.md" cp "$TMPDIR/test.md" "$ROOT/test.md"
+run_test "cp -r nested dir" cp -r "$TMPDIR/nested" "$ROOT/"
+run_test_expect_output "ls shows deep.txt path" "deep.txt" find "$ROOT" -name "deep.txt"
 
 # ── 4. Listing & Verification ───────────────────────────────────────────
 
 section "List & Verify"
 
-run_test "ls (after uploads)" ls "$ALIAS:/"
+run_test_expect_output "ls after uploads" "small.txt" ls "$ROOT"
+run_test_expect_output "find *.bin" "medium.bin" find "$ROOT" -name "*.bin"
+run_test_expect_output "stat medium.bin" "Size:" stat "$ROOT/medium.bin"
+run_test_expect_output "du -s" "total\|B\|K\|M\|[0-9]" du -s "$ROOT"
+run_test "du -sH" du -sH "$ROOT"
+run_test "tree after upload" tree "$ROOT"
 
-# ── 5. File Removal ─────────────────────────────────────────────────────
+# ── 5. Download (cp remote → local) ─────────────────────────────────────
+
+section "File Download"
+
+mkdir -p "$TMPDIR/dl"
+run_test "cp download small.txt" cp "$ROOT/small.txt" "$TMPDIR/dl/small.txt"
+run_test_expect_output "downloaded content" "Hello from tup realtest" cat "$ROOT/small.txt"
+# verify local file content
+printf "  %-50s " "[$SECTION] local file matches"
+if grep -q "Hello from tup realtest" "$TMPDIR/dl/small.txt" 2>/dev/null; then
+    echo -e "${GREEN}PASS${RESET}"
+    PASSED=$((PASSED + 1))
+else
+    echo -e "${RED}FAIL${RESET}"
+    FAILED=$((FAILED + 1))
+fi
+run_test "cp -r download nested" cp -r "$ROOT/nested" "$TMPDIR/dl/"
+
+# ── 6. Remote copy ──────────────────────────────────────────────────────
+
+section "Remote Copy"
+
+run_test "cp remote file" cp "$ROOT/small.txt" "$ROOT/small-copy.txt"
+run_test "cp -r remote dir" cp -r "$ROOT/nested" "$ROOT/nested-copy"
+run_test_expect_output "remote copy listed" "small-copy.txt" ls "$ROOT"
+
+# ── 7. Move / rename ────────────────────────────────────────────────────
+
+section "Move & Rename"
+
+run_test "mv rename file" mv "$ROOT/small-copy.txt" "$ROOT/renamed.txt"
+run_test_expect_output "renamed exists" "renamed.txt" ls "$ROOT"
+run_test "mv into dir" mv "$ROOT/renamed.txt" "$ROOT/test_dir/"
+run_test_expect_output "moved into test_dir" "renamed.txt" ls "$ROOT/test_dir"
+
+# ── 8. Touch / cat / rmdir ──────────────────────────────────────────────
+
+section "Touch Cat Rmdir"
+
+run_test "touch new file" touch "$ROOT/touched.txt"
+run_test "touch existing" touch "$ROOT/touched.txt"
+run_test "mkdir empty" mkdir "$ROOT/empty_dir"
+run_test "rmdir empty" rmdir "$ROOT/empty_dir"
+run_test_expect_fail "rmdir non-empty" rmdir "$ROOT/test_dir"
+run_test "cat small.txt" cat "$ROOT/small.txt"
+
+# ── 9. File Removal ─────────────────────────────────────────────────────
 
 section "File Removal"
 
-run_test "rm (test.json)" rm "$ALIAS:/test.json"
-run_test "rm (test.md)" rm "$ALIAS:/test.md"
+run_test "rm file" rm "$ROOT/test.json"
+run_test "rm -f missing" rm -f "$ROOT/does-not-exist"
+run_test_expect_fail "rm dir without -r" rm "$ROOT/nested"
+run_test "rm -r dir" rm -r "$ROOT/nested-copy"
+run_test "rm test.md" rm "$ROOT/test.md"
 
-# ── 6. Stub Commands (should not crash) ─────────────────────────────────
-
-section "Stub Commands (no-crash)"
-
-run_test "mv" mv "$ALIAS:/small.txt" "$ALIAS:/renamed.txt"
-run_test "cat" cat "$ALIAS:/medium.bin"
-run_test "find" find "$ALIAS:/" "*.bin"
-run_test "stat" stat "$ALIAS:/medium.bin"
-run_test "tree" tree "$ALIAS:/"
-run_test "touch" touch "$ALIAS:/touched.txt"
-run_test "du" du "$ALIAS:/"
-
-# ── 7. Backup & Restore ─────────────────────────────────────────────────
+# ── 10. Backup ──────────────────────────────────────────────────────────
 
 section "Backup & Restore"
 
 run_test "backup" backup "$ALIAS"
 
-# ── 8. Edge Cases ────────────────────────────────────────────────────────
+# ── 11. Edge Cases ──────────────────────────────────────────────────────
 
 section "Edge Cases"
 
@@ -214,8 +276,9 @@ run_test_expect_fail "cp (no args)" cp
 run_test_expect_output "rm (local path)" "standard" rm "/tmp/localfile.txt"
 run_test_expect_output "ls (local path)" "standard" ls "/tmp"
 run_test_expect_output "mkdir (local path)" "standard" mkdir "/tmp/nope"
+run_test_expect_output "bare alias tree" "directories\|files\|/" tree "$ALIAS"
 
-# ── 9. Help & Info ───────────────────────────────────────────────────────
+# ── 12. Help & Info ─────────────────────────────────────────────────────
 
 section "Help & Info"
 
@@ -223,6 +286,8 @@ run_test "help" --help
 run_test "drive help" drive --help
 run_test "cp help" cp --help
 run_test "ls help" ls --help
+run_test "find help" find --help
+run_test "du help" du --help
 
 # ══════════════════════════════════════════════════════════════════════════
 # CLEANUP
@@ -230,14 +295,9 @@ run_test "ls help" ls --help
 
 section "Cleanup"
 
-echo "  Removing remote test files..."
-$TUP_CMD rm "$ALIAS:/small.txt"     >/dev/null 2>&1 || true
-$TUP_CMD rm "$ALIAS:/renamed.txt"   >/dev/null 2>&1 || true
-$TUP_CMD rm "$ALIAS:/medium.bin"    >/dev/null 2>&1 || true
-$TUP_CMD rm "$ALIAS:/test.json"     >/dev/null 2>&1 || true
-$TUP_CMD rm "$ALIAS:/test.md"       >/dev/null 2>&1 || true
-$TUP_CMD rm "$ALIAS:/touched.txt"   >/dev/null 2>&1 || true
-echo "  Removing local test fixtures..."
+echo "  Removing sandbox $ROOT ..."
+$TUP_CMD rm -rf "$ROOT" >/dev/null 2>&1 || $TUP_CMD rm -r "$ROOT" >/dev/null 2>&1 || true
+echo "  Removing local fixtures..."
 rm -rf "$TMPDIR"
 echo "  ✓ Cleanup complete"
 

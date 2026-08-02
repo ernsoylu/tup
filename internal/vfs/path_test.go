@@ -13,9 +13,10 @@ func TestParsePath(t *testing.T) {
 		{"VFS:///docs/a.txt", "VFS", "/docs/a.txt", "VFS:/docs/a.txt", true},
 		{"work:/docs/file.txt", "work", "/docs/file.txt", "work:/docs/file.txt", true},
 		{"work:/", "work", "/", "work:/", true},
+		{"VFS:", "VFS", "/", "VFS:/", true},
+		{"VFS://", "VFS", "/", "VFS:/", true},
 		{"README.md", "", "README.md", "README.md", false},
 		{"./local-report.pdf", "", "./local-report.pdf", "./local-report.pdf", false},
-		{"VFS:", "", "VFS:", "VFS:", false},
 	}
 
 	for _, row := range rows {

@@ -13,6 +13,7 @@ import (
 
 // VfsBackupEntry must match the struct in cli/backup.go
 type VfsBackupEntry struct {
+	ID        int    `json:"id,omitempty"`
 	Alias     string `json:"alias"`
 	ParentID  int    `json:"parent_id"`
 	Name      string `json:"name"`
@@ -66,22 +67,32 @@ func restoreToDB(entries []VfsBackupEntry) error {
 		return err
 	}
 
-	stmt, err := tx.Prepare(`
+	stmtWithID, err := tx.Prepare(`
+		INSERT OR REPLACE INTO vfs_entries (id, alias, parent_id, name, is_dir, size, sha256, message_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	defer func() { _ = stmtWithID.Close() }()
+
+	stmtWithoutID, err := tx.Prepare(`
 		INSERT OR REPLACE INTO vfs_entries (alias, parent_id, name, is_dir, size, sha256, message_id)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
+		_ = tx.Rollback()
 		return err
 	}
-	defer func() { _ = stmt.Close() }()
+	defer func() { _ = stmtWithoutID.Close() }()
 
 	for _, e := range entries {
-		var parentID interface{}
-		if e.ParentID != 0 {
-			parentID = e.ParentID
+		if e.ID != 0 {
+			_, err = stmtWithID.Exec(e.ID, e.Alias, e.ParentID, e.Name, e.IsDir, e.Size, e.Sha256, e.MessageID)
+		} else {
+			_, err = stmtWithoutID.Exec(e.Alias, e.ParentID, e.Name, e.IsDir, e.Size, e.Sha256, e.MessageID)
 		}
-
-		_, err = stmt.Exec(e.Alias, parentID, e.Name, e.IsDir, e.Size, e.Sha256, e.MessageID)
 		if err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("failed to insert entry %s: %w", e.Name, err)

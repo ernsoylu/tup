@@ -13,6 +13,7 @@ import (
 )
 
 type VfsBackupEntry struct {
+	ID        int    `json:"id,omitempty"`
 	Alias     string `json:"alias"`
 	ParentID  int    `json:"parent_id"`
 	Name      string `json:"name"`
@@ -36,7 +37,7 @@ var backupCmd = &cobra.Command{
 			return
 		}
 
-		rows, err := core.DB.Query("SELECT alias, parent_id, name, is_dir, size, sha256, message_id FROM vfs_entries WHERE alias = ?", alias)
+		rows, err := core.DB.Query("SELECT id, alias, parent_id, name, is_dir, size, sha256, message_id FROM vfs_entries WHERE alias = ?", alias)
 		if err != nil {
 			pterm.Error.Println("Failed to query database:", err)
 			return
@@ -49,7 +50,7 @@ var backupCmd = &cobra.Command{
 			var parentID, size, msgID interface{}
 			var sha256 interface{}
 
-			err = rows.Scan(&e.Alias, &parentID, &e.Name, &e.IsDir, &size, &sha256, &msgID)
+			err = rows.Scan(&e.ID, &e.Alias, &parentID, &e.Name, &e.IsDir, &size, &sha256, &msgID)
 			if err != nil {
 				pterm.Error.Println("Row scan error:", err)
 				return
@@ -74,6 +75,17 @@ var backupCmd = &cobra.Command{
 
 		if len(entries) == 0 {
 			pterm.Warning.Println("No files found in this drive. Nothing to backup.")
+			return
+		}
+
+		asJSON, _ := cmd.Flags().GetBool("json")
+		toStdout, _ := cmd.Flags().GetBool("stdout")
+		if asJSON || toStdout {
+			encoder := json.NewEncoder(os.Stdout)
+			encoder.SetIndent("", "  ")
+			if err := encoder.Encode(entries); err != nil {
+				pterm.Error.Println("JSON encoding failed:", err)
+			}
 			return
 		}
 
@@ -116,5 +128,7 @@ var backupCmd = &cobra.Command{
 }
 
 func init() {
+	backupCmd.Flags().Bool("stdout", false, "print backup JSON to stdout instead of uploading to Telegram")
+	backupCmd.Flags().Bool("json", false, "emit backup JSON to stdout (for export / AI tools)")
 	RootCmd.AddCommand(backupCmd)
 }
