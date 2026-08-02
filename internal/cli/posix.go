@@ -251,6 +251,11 @@ var duCmd = &cobra.Command{
 }
 
 func init() {
+	// Prevent negative chat IDs (e.g. -1004342175024:/path) from being misparsed as shorthand flags
+	for _, cmd := range []*cobra.Command{cpCmd, mvCmd, rmCmd, rmdirCmd, mkdirCmd, lsCmd, catCmd, findCmd, statCmd, treeCmd, touchCmd, duCmd} {
+		cmd.Flags().SetInterspersed(false)
+	}
+
 	// Flags for rm
 	rmCmd.Flags().BoolP("recursive", "r", false, "remove directories and their contents recursively")
 	rmCmd.Flags().BoolP("force", "f", false, "ignore nonexistent files and arguments, never prompt")

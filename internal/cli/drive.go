@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"strconv"
 	"strings"
 
 	"github.com/ernsoylu/tup/internal/core"
@@ -20,8 +21,13 @@ var driveAddCmd = &cobra.Command{
 	Short: "Register a Telegram chat as a remote drive",
 	Args:  cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
-		alias := args[0]
+		alias := strings.TrimRight(args[0], ":/")
 		chatID := args[1]
+
+		if _, err := strconv.ParseInt(chatID, 10, 64); err != nil {
+			pterm.Error.Println("Invalid chat ID. Must be a numeric ID (e.g. -1004342175024).")
+			return
+		}
 
 		_, err := core.DB.Exec("INSERT OR REPLACE INTO drive_aliases (alias, chat_id) VALUES (?, ?)", alias, chatID)
 		if err != nil {
