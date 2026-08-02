@@ -17,7 +17,7 @@ var loginCmd = &cobra.Command{
 		pterm.DefaultHeader.WithFullWidth().WithBackgroundStyle(pterm.NewStyle(pterm.BgMagenta)).Println("Tup Setup")
 
 		pterm.Info.Println("We need your Telegram API ID and API Hash from my.telegram.org to authenticate your user account.")
-		
+
 		apiIDStr, _ := pterm.DefaultInteractiveTextInput.WithDefaultText("Enter your API_ID").Show()
 		apiHash, _ := pterm.DefaultInteractiveTextInput.WithDefaultText("Enter your API_HASH").Show()
 
