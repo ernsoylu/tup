@@ -31,7 +31,7 @@ var cpCmd = &cobra.Command{
 				return
 			}
 
-			pterm.Info.Printf("Uploading %s to %s:/%s\n", srcInfo.Path, dstInfo.Alias, dstInfo.Path)
+			pterm.Info.Printf("Uploading %s to %s\n", srcInfo.Path, dstInfo.Format())
 			chatID, err := core.GetChatID(dstInfo.Alias)
 			if err != nil {
 				pterm.Error.Println("Failed to resolve alias:", err)
@@ -76,7 +76,7 @@ var cpCmd = &cobra.Command{
 				return
 			}
 
-			pterm.Success.Printf("Uploaded %s to %s:/%s (Size: %d bytes)\n", srcInfo.Path, dstInfo.Alias, filename, st.Size())
+			pterm.Success.Printf("Uploaded %s to %s (Size: %d bytes)\n", srcInfo.Path, vfs.FormatRemote(dstInfo.Alias, filename), st.Size())
 		} else if srcInfo.IsRemote && !dstInfo.IsRemote {
 			entry, err := core.GetEntryByPath(srcInfo.Alias, srcInfo.Path)
 			if err != nil || entry == nil {
@@ -105,7 +105,7 @@ var cpCmd = &cobra.Command{
 				return
 			}
 
-			pterm.Info.Printf("Downloading %s:/%s (%d bytes) to %s...\n", srcInfo.Alias, entry.Name, entry.Size, destPath)
+			pterm.Info.Printf("Downloading %s (%d bytes) to %s...\n", srcInfo.Format(), entry.Size, destPath)
 
 			err = telegram.DownloadFileMTProto(cmd.Context(), chatID, entry.MessageID, outFile)
 			_ = outFile.Close()
@@ -114,9 +114,9 @@ var cpCmd = &cobra.Command{
 				return
 			}
 
-			pterm.Success.Printf("Downloaded %s:/%s to %s\n", srcInfo.Alias, entry.Name, destPath)
+			pterm.Success.Printf("Downloaded %s to %s\n", srcInfo.Format(), destPath)
 		} else if srcInfo.IsRemote && dstInfo.IsRemote {
-			pterm.Info.Printf("Remote Copy %s:/%s to %s:/%s\n", srcInfo.Alias, srcInfo.Path, dstInfo.Alias, dstInfo.Path)
+			pterm.Info.Printf("Remote Copy %s to %s\n", srcInfo.Format(), dstInfo.Format())
 		} else {
 			pterm.Error.Println("Local to local copies are not supported by tup. Use standard 'cp'.")
 			return
@@ -163,7 +163,7 @@ var rmCmd = &cobra.Command{
 		}
 
 		// Call telegram to delete the actual message using entry.MessageID when implemented
-		pterm.Success.Printf("Removed %s:/%s\n", targetInfo.Alias, targetInfo.Path)
+		pterm.Success.Printf("Removed %s\n", targetInfo.Format())
 	},
 }
 
@@ -202,7 +202,7 @@ var mkdirCmd = &cobra.Command{
 			pterm.Error.Println("Failed to create directory:", err)
 			return
 		}
-		pterm.Success.Printf("Created directory %s:/%s\n", targetInfo.Alias, targetInfo.Path)
+		pterm.Success.Printf("Created directory %s\n", targetInfo.Format())
 	},
 }
 
