@@ -2,6 +2,8 @@ package telegram
 
 import (
 	"context"
+	crand "crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -167,8 +169,13 @@ func UploadFileMTProto(ctx context.Context, localPath, chatIDStr string) error {
 
 		pterm.Info.Println("Upload complete, finalizing message...")
 
+		var randBuf [8]byte
+		_, _ = crand.Read(randBuf[:])
+		randomID := int64(binary.LittleEndian.Uint64(randBuf[:]))
+
 		_, err = api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
-			Peer: peer,
+			Peer:     peer,
+			RandomID: randomID,
 			Media: &tg.InputMediaUploadedDocument{
 				File:     upload,
 				MimeType: "application/octet-stream",
