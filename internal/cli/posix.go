@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/ernsoylu/tup/internal/core"
@@ -71,9 +72,26 @@ var rmCmd = &cobra.Command{
 	Short: "Remove files or directories",
 	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		recursive, _ := cmd.Flags().GetBool("recursive")
-		force, _ := cmd.Flags().GetBool("force")
-		fmt.Printf("Removing %v (recursive: %v, force: %v)\n", args, recursive, force)
+		targetInfo := vfs.ParsePath(args[0])
+		if !targetInfo.IsRemote {
+			pterm.Error.Println("Use standard 'rm' for local files.")
+			return
+		}
+
+		entry, err := core.GetEntryByPath(targetInfo.Alias, targetInfo.Path)
+		if err != nil {
+			pterm.Error.Println(err)
+			return
+		}
+
+		err = core.DeleteEntry(entry.ID)
+		if err != nil {
+			pterm.Error.Println("Failed to delete entry:", err)
+			return
+		}
+
+		// TODO: Call telegram to delete the actual message using entry.MessageID
+		pterm.Success.Printf("Removed %s:/%s\n", targetInfo.Alias, targetInfo.Path)
 	},
 }
 
@@ -83,7 +101,7 @@ var rmdirCmd = &cobra.Command{
 	Short: "Remove empty directories",
 	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Printf("Removing empty directory %v\n", args)
+		pterm.Error.Println("Not implemented yet. Use 'rm -r'.")
 	},
 }
 
@@ -93,7 +111,26 @@ var mkdirCmd = &cobra.Command{
 	Short: "Create directories",
 	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Printf("Creating directory %v\n", args)
+		targetInfo := vfs.ParsePath(args[0])
+		if !targetInfo.IsRemote {
+			pterm.Error.Println("Use standard 'mkdir' for local directories.")
+			return
+		}
+		
+		// Simplistic implementation for prototype:
+		// We insert it directly into root (parent_id = 0) for testing
+		err := core.InsertEntry(core.VfsEntry{
+			Alias:    targetInfo.Alias,
+			ParentID: 0, 
+			Name:     strings.Trim(targetInfo.Path, "/"),
+			IsDir:    true,
+		})
+		
+		if err != nil {
+			pterm.Error.Println("Failed to create directory:", err)
+			return
+		}
+		pterm.Success.Printf("Created directory %s:/%s\n", targetInfo.Alias, targetInfo.Path)
 	},
 }
 
@@ -107,7 +144,37 @@ var lsCmd = &cobra.Command{
 		if len(args) > 0 {
 			target = args[0]
 		}
-		fmt.Printf("Listing contents of %s\n", target)
+		
+		targetInfo := vfs.ParsePath(target)
+		if !targetInfo.IsRemote {
+			pterm.Error.Println("Use standard 'ls' for local directories.")
+			return
+		}
+
+		entry, err := core.GetEntryByPath(targetInfo.Alias, targetInfo.Path)
+		if err != nil {
+			pterm.Error.Println(err)
+			return
+		}
+
+		if !entry.IsDir {
+			pterm.DefaultBasicText.Println(entry.Name)
+			return
+		}
+
+		children, err := core.ListDirectory(targetInfo.Alias, entry.ID)
+		if err != nil {
+			pterm.Error.Println("Failed to list directory:", err)
+			return
+		}
+
+		for _, child := range children {
+			if child.IsDir {
+				pterm.DefaultBasicText.Printf(pterm.Blue("%s/\n"), child.Name)
+			} else {
+				pterm.DefaultBasicText.Printf("%s\t(Size: %d)\n", child.Name, child.Size)
+			}
+		}
 	},
 }
 
