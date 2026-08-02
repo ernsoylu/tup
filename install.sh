@@ -32,15 +32,13 @@ elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
     ARCH="arm64"
 fi
 
-BINARY_NAME="tup_${OS}_${ARCH}"
-if [ "$OS" = "darwin" ]; then
-    BINARY_NAME="tup_darwin_${ARCH}"
+if [ "$OS" = "windows" ]; then
+    echo "Error: on Windows, download the zip manually from https://github.com/$REPO/releases" >&2
+    exit 1
 fi
 
-DOWNLOAD_URL="https://github.com/$REPO/releases/download/$VERSION/$BINARY_NAME"
-if [ "$OS" = "windows" ]; then
-    DOWNLOAD_URL="${DOWNLOAD_URL}.exe"
-fi
+ARCHIVE_NAME="tup_${OS}_${ARCH}.tar.gz"
+DOWNLOAD_URL="https://github.com/$REPO/releases/download/$VERSION/$ARCHIVE_NAME"
 
 DEST_DIR="/usr/local/bin"
 if [ ! -w "$DEST_DIR" ]; then
@@ -52,14 +50,18 @@ fi
 
 DEST_FILE="$DEST_DIR/tup"
 
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT
+
 echo "Downloading tup $VERSION for $OS ($ARCH)..."
 if command -v curl >/dev/null 2>&1; then
-    curl --proto '=https' --tlsv1.2 -L "$DOWNLOAD_URL" -o "$DEST_FILE"
+    curl --proto '=https' --tlsv1.2 -fL "$DOWNLOAD_URL" -o "$TMP_DIR/$ARCHIVE_NAME"
 else
-    wget --https-only --max-redirect=0 "$DOWNLOAD_URL" -O "$DEST_FILE"
+    wget --https-only "$DOWNLOAD_URL" -O "$TMP_DIR/$ARCHIVE_NAME"
 fi
 
-chmod +x "$DEST_FILE"
+tar -xzf "$TMP_DIR/$ARCHIVE_NAME" -C "$TMP_DIR" tup
+install -m 755 "$TMP_DIR/tup" "$DEST_FILE"
 
 echo "Successfully installed tup to $DEST_FILE"
 echo "Run 'tup login' to get started!"
