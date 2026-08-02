@@ -32,3 +32,6 @@ dist-bin/
 *.bin
 small_test.txt
 test/
+
+# Compiled binary
+/tup
