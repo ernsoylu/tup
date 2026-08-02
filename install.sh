@@ -11,7 +11,7 @@ echo "Fetching latest release information..."
 if command -v curl >/dev/null 2>&1; then
     RELEASE_DATA=$(curl -s $GITHUB_URL)
 elif command -v wget >/dev/null 2>&1; then
-    RELEASE_DATA=$(wget -qO- $GITHUB_URL)
+    RELEASE_DATA=$(wget --https-only -qO- $GITHUB_URL)
 else
     echo "Error: curl or wget is required" >&2
     exit 1
@@ -54,9 +54,9 @@ DEST_FILE="$DEST_DIR/tup"
 
 echo "Downloading tup $VERSION for $OS ($ARCH)..."
 if command -v curl >/dev/null 2>&1; then
-    curl -L "$DOWNLOAD_URL" -o "$DEST_FILE"
+    curl --proto '=https' --tlsv1.2 -L "$DOWNLOAD_URL" -o "$DEST_FILE"
 else
-    wget "$DOWNLOAD_URL" -O "$DEST_FILE"
+    wget --https-only "$DOWNLOAD_URL" -O "$DEST_FILE"
 fi
 
 chmod +x "$DEST_FILE"

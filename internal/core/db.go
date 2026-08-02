@@ -69,4 +69,3 @@ func GetChatID(alias string) (string, error) {
 	}
 	return chatID, nil
 }
-

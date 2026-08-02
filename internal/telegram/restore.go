@@ -26,10 +26,10 @@ type VfsBackupEntry struct {
 func SearchAndRestoreBackup(ctx context.Context, alias, chatIDStr string) error {
 	return Run(ctx, func(ctx context.Context) error {
 		pterm.Info.Printf("Connecting to chat %s to search for backups...\n", chatIDStr)
-		
+
 		// We simulate the download step since full MTProto search
 		// requires handling peer resolution and history pagination.
-		
+
 		home, _ := os.UserHomeDir()
 		backupFile := filepath.Join(home, ".tup", fmt.Sprintf("tup_backup_%s.json", alias))
 

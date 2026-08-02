@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 
 	"github.com/ernsoylu/tup/internal/core"
-	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/session"
+	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/message"
 	"github.com/gotd/td/telegram/uploader"
 	"github.com/pterm/pterm"
@@ -47,19 +47,19 @@ func Run(ctx context.Context, f func(ctx context.Context) error) error {
 		if err != nil {
 			return fmt.Errorf("failed to check auth status: %w", err)
 		}
-		
+
 		if !status.Authorized {
 			token := core.AppConfig.TelegramBotToken
 			if token == "" {
 				return fmt.Errorf("MTProto client is not authorized and TELEGRAM_BOT_TOKEN is missing")
 			}
-			
+
 			_, err = Client.Auth().Bot(ctx, token)
 			if err != nil {
 				return fmt.Errorf("bot login failed: %w", err)
 			}
 		}
-		
+
 		return f(ctx)
 	})
 }
@@ -79,7 +79,7 @@ func UploadFileMTProto(ctx context.Context, localPath, chatIDStr string) error {
 		}
 
 		pterm.Info.Printf("Uploading %s to Telegram (up to 2GB)...\n", localPath)
-		
+
 		f, err := os.Open(localPath)
 		if err != nil {
 			return err
@@ -92,12 +92,12 @@ func UploadFileMTProto(ctx context.Context, localPath, chatIDStr string) error {
 		}
 
 		pterm.Info.Println("Upload complete, finalizing message...")
-		
+
 		msg, err := sender.To(peer).Document(ctx, upload)
 		if err != nil {
 			return fmt.Errorf("failed to send document: %w", err)
 		}
-		
+
 		_ = msg
 		pterm.Success.Println("File sent to Telegram successfully!")
 		return nil

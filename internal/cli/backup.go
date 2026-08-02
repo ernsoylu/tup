@@ -80,13 +80,13 @@ var backupCmd = &cobra.Command{
 		// Save to temp JSON file
 		home, _ := os.UserHomeDir()
 		backupFile := filepath.Join(home, ".tup", fmt.Sprintf("tup_backup_%s.json", alias))
-		
+
 		file, err := os.Create(backupFile)
 		if err != nil {
 			pterm.Error.Println("Failed to create backup file:", err)
 			return
 		}
-		
+
 		encoder := json.NewEncoder(file)
 		encoder.SetIndent("", "  ")
 		if err := encoder.Encode(entries); err != nil {

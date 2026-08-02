@@ -21,17 +21,17 @@ func GetEntryByPath(alias, path string) (*VfsEntry, error) {
 	if path == "/" || path == "" {
 		return &VfsEntry{ID: 0, Alias: alias, IsDir: true, Name: "/"}, nil
 	}
-	
+
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	parentID := 0
-	
+
 	var current *VfsEntry
-	
+
 	for _, part := range parts {
 		if part == "" {
 			continue
 		}
-		
+
 		var entry VfsEntry
 		err := DB.QueryRow(`
 			SELECT id, alias, parent_id, name, is_dir, size, sha256, message_id 
@@ -39,15 +39,15 @@ func GetEntryByPath(alias, path string) (*VfsEntry, error) {
 			WHERE alias = ? AND parent_id = ? AND name = ?`,
 			alias, parentID, part).
 			Scan(&entry.ID, &entry.Alias, &entry.ParentID, &entry.Name, &entry.IsDir, &entry.Size, &entry.Sha256, &entry.MessageID)
-			
+
 		if err != nil {
 			return nil, fmt.Errorf("path not found: %s", path)
 		}
-		
+
 		current = &entry
 		parentID = entry.ID
 	}
-	
+
 	return current, nil
 }
 
@@ -71,7 +71,7 @@ func ListDirectory(alias string, parentID int) ([]VfsEntry, error) {
 		}
 		entries = append(entries, e)
 	}
-	
+
 	return entries, nil
 }
 

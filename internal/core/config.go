@@ -21,10 +21,10 @@ func InitConfig() error {
 	if err != nil {
 		return err
 	}
-	
+
 	viper.SetConfigFile(filepath.Join(home, ".tup", ".env"))
 	viper.SetConfigType("env")
-	
+
 	// Default to environment variables if present
 	viper.AutomaticEnv()
 

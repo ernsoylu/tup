@@ -29,7 +29,7 @@ var driveAddCmd = &cobra.Command{
 		}
 
 		pterm.Success.Printf("Registered drive '%s' -> %s\n", alias, chatID)
-		
+
 		pterm.Info.Println("Scanning chat for existing VFS backup...")
 		err = telegram.SearchAndRestoreBackup(cmd.Context(), alias, chatID)
 		if err != nil {

@@ -19,7 +19,7 @@ var cpCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
 		pterm.DefaultHeader.WithFullWidth().WithBackgroundStyle(pterm.NewStyle(pterm.BgBlue)).Println("Tup Copy")
-		
+
 		srcInfo := vfs.ParsePath(args[0])
 		dstInfo := vfs.ParsePath(args[1])
 
@@ -116,16 +116,16 @@ var mkdirCmd = &cobra.Command{
 			pterm.Error.Println("Use standard 'mkdir' for local directories.")
 			return
 		}
-		
+
 		// Simplistic implementation for prototype:
 		// We insert it directly into root (parent_id = 0) for testing
 		err := core.InsertEntry(core.VfsEntry{
 			Alias:    targetInfo.Alias,
-			ParentID: 0, 
+			ParentID: 0,
 			Name:     strings.Trim(targetInfo.Path, "/"),
 			IsDir:    true,
 		})
-		
+
 		if err != nil {
 			pterm.Error.Println("Failed to create directory:", err)
 			return
@@ -144,7 +144,7 @@ var lsCmd = &cobra.Command{
 		if len(args) > 0 {
 			target = args[0]
 		}
-		
+
 		targetInfo := vfs.ParsePath(target)
 		if !targetInfo.IsRemote {
 			pterm.Error.Println("Use standard 'ls' for local directories.")
@@ -246,7 +246,7 @@ func init() {
 	// Flags for rm
 	rmCmd.Flags().BoolP("recursive", "r", false, "remove directories and their contents recursively")
 	rmCmd.Flags().BoolP("force", "f", false, "ignore nonexistent files and arguments, never prompt")
-	
+
 	// Flags for mkdir
 	mkdirCmd.Flags().BoolP("parents", "p", false, "no error if existing, make parent directories as needed")
 
