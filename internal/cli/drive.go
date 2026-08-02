@@ -119,6 +119,8 @@ var driveChatsCmd = &cobra.Command{
 }
 
 func init() {
+	// Allow negative chat IDs (e.g. -1004342175024) without Cobra treating them as flags
+	driveAddCmd.Flags().SetInterspersed(false)
 	driveChatsCmd.Flags().StringP("filter", "f", "", "filter chats by name (case-insensitive)")
 	driveCmd.AddCommand(driveAddCmd, driveListCmd, driveChatsCmd)
 	RootCmd.AddCommand(driveCmd)
