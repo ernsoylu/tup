@@ -1,73 +1,65 @@
 #!/bin/sh
-# tup installer — https://github.com/ernsoylu/tup
-#
-#   curl -fsSL https://raw.githubusercontent.com/ernsoylu/tup/main/install.sh | sh
-#
-# Detects the OS (Linux, macOS) and architecture, downloads the latest release,
-# and installs it to ~/.tup/bin (and symlinks to ~/.local/bin or /usr/local/bin).
-set -eu
+set -e
+
+# tup - installation script (MDView style)
+# Installs the compiled Go binary
 
 REPO="ernsoylu/tup"
+GITHUB_URL="https://api.github.com/repos/$REPO/releases/latest"
 
-say() { printf '%s\n' "$*"; }
-die() { printf 'tup installer: %s\n' "$*" >&2; exit 1; }
-
-https_curl() { curl -fsSL --proto '=https' --proto-redir '=https' "$@"; }
-
-command -v curl >/dev/null 2>&1 || die "curl is required"
-command -v tar >/dev/null 2>&1 || die "tar is required"
-
-os=$(uname -s)
-case "$os" in
-	Linux) os_name=linux ;;
-	Darwin) os_name=macos ;;
-	*) die "unsupported OS: $os (Windows: download from https://github.com/$REPO/releases)" ;;
-esac
-
-arch=$(uname -m)
-case "$arch" in
-	x86_64 | amd64) arch_name=x86_64 ;;
-	aarch64 | arm64) arch_name=arm64 ;;
-	*) die "unsupported architecture: $arch" ;;
-esac
-
-if [ "$os_name" = "linux" ] && [ "$arch_name" = "arm64" ]; then
-    die "no prebuilt binaries for Linux arm64 yet."
-fi
-
-target="${os_name}-${arch_name}"
-
-tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
-
-say "Finding the latest release..."
-release_json=$(https_curl "https://api.github.com/repos/$REPO/releases/latest") ||
-	die "could not reach the release feed"
-tag=$(printf '%s' "$release_json" | grep '"tag_name"' | head -1 |
-	sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
-[ -n "$tag" ] || die "could not determine the latest release"
-
-asset="tup-${tag}-${target}.tar.gz"
-base="https://github.com/$REPO/releases/download/$tag"
-
-say "Downloading $asset ($tag)..."
-https_curl -o "$tmp/$asset" "$base/$asset" ||
-	die "download failed — is there a $target build for $tag?"
-
-tar -xzf "$tmp/$asset" -C "$tmp"
-extract_dir="$tmp/tup-${target}"
-
-if [ ! -d "$extract_dir" ]; then
-    die "archive did not contain the expected directory tup-${target}"
-fi
-
-# We use the packaged install.sh from the tarball to finish the installation.
-if [ -f "$extract_dir/install.sh" ]; then
-    say "Running installer..."
-    sh "$extract_dir/install.sh" "$extract_dir/tup"
+echo "Fetching latest release information..."
+if command -v curl >/dev/null 2>&1; then
+    RELEASE_DATA=$(curl -s $GITHUB_URL)
+elif command -v wget >/dev/null 2>&1; then
+    RELEASE_DATA=$(wget -qO- $GITHUB_URL)
 else
-    die "install.sh not found inside the release archive."
+    echo "Error: curl or wget is required"
+    exit 1
 fi
 
-say ""
-say "Release notes: https://github.com/$REPO/releases/tag/$tag"
+VERSION=$(echo "$RELEASE_DATA" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+if [ -z "$VERSION" ]; then
+    echo "Error: Could not determine latest version"
+    exit 1
+fi
+
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+ARCH=$(uname -m)
+
+if [ "$ARCH" = "x86_64" ]; then
+    ARCH="amd64"
+elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
+    ARCH="arm64"
+fi
+
+BINARY_NAME="tup_${OS}_${ARCH}"
+if [ "$OS" = "darwin" ]; then
+    BINARY_NAME="tup_darwin_${ARCH}"
+fi
+
+DOWNLOAD_URL="https://github.com/$REPO/releases/download/$VERSION/$BINARY_NAME"
+if [ "$OS" = "windows" ]; then
+    DOWNLOAD_URL="${DOWNLOAD_URL}.exe"
+fi
+
+DEST_DIR="/usr/local/bin"
+if [ ! -w "$DEST_DIR" ]; then
+    DEST_DIR="$HOME/.local/bin"
+    mkdir -p "$DEST_DIR"
+    echo "Note: Installing to $DEST_DIR because /usr/local/bin is not writable."
+    echo "Make sure $DEST_DIR is in your PATH."
+fi
+
+DEST_FILE="$DEST_DIR/tup"
+
+echo "Downloading tup $VERSION for $OS ($ARCH)..."
+if command -v curl >/dev/null 2>&1; then
+    curl -L "$DOWNLOAD_URL" -o "$DEST_FILE"
+else
+    wget "$DOWNLOAD_URL" -O "$DEST_FILE"
+fi
+
+chmod +x "$DEST_FILE"
+
+echo "Successfully installed tup to $DEST_FILE"
+echo "Run 'tup login' to get started!"

@@ -1,0 +1,43 @@
+package core
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/spf13/viper"
+)
+
+type Config struct {
+	TelegramBotToken string `mapstructure:"TELEGRAM_BOT_TOKEN"`
+	TelegramAPIID    int    `mapstructure:"TELEGRAM_API_ID"`
+	TelegramAPIHash  string `mapstructure:"TELEGRAM_API_HASH"`
+}
+
+var AppConfig Config
+
+func InitConfig() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	
+	viper.SetConfigFile(filepath.Join(home, ".tup", ".env"))
+	viper.SetConfigType("env")
+	
+	// Default to environment variables if present
+	viper.AutomaticEnv()
+
+	// It's okay if .env doesn't exist yet (e.g. first run)
+	if err := viper.ReadInConfig(); err != nil {
+		if !os.IsNotExist(err) {
+			// Ignore not-exist errors, we will prompt the user to configure later
+		}
+	}
+
+	if err := viper.Unmarshal(&AppConfig); err != nil {
+		return fmt.Errorf("failed to unmarshal config: %w", err)
+	}
+
+	return nil
+}
