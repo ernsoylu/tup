@@ -5,6 +5,7 @@
 ## Features
 
 - **POSIX Interface**: Use `tup cp`, `tup ls`, `tup rm`, `tup mkdir` exactly as you would natively.
+- **Chat Discovery**: Run `tup drive chats` to list your Telegram chats with their IDs — no external bots needed to find a Chat ID.
 - **Native 2GB Support**: Utilizes the `gotd/td` MTProto client to unlock Telegram's native 2GB file upload limits.
 - **VFS Backups**: Safely backup your drive's index into a JSON file embedded right in the chat.
 - **Instant Restore**: Connect to an existing drive on a new device, and it will auto-restore the VFS from the chat history.
@@ -30,11 +31,18 @@ tup login
 ```
 *Note: We highly recommend MTProto (2GB) mode. You will need your `API_ID` and `API_HASH` from [my.telegram.org](https://my.telegram.org).*
 
-### 2. Register a Drive
+### 2. Find and Register a Drive
 
-Register any Telegram Chat ID as an alias:
+List your Telegram chats to find the one you want to use as a drive:
+```bash
+tup drive chats                # all chats with name, type, username and Chat ID
+tup drive chats --filter work  # filter by name (case-insensitive)
+```
+
+Then register a Chat ID as an alias:
 ```bash
 tup drive add work <chat_id>
+tup drive list                 # show registered drives
 ```
 *(If a backup exists in this chat, `tup` will automatically restore your virtual file system cache!)*
 
@@ -55,6 +63,8 @@ tup cp work:/docs/report.pdf ./downloaded.pdf
 tup rm work:/docs/report.pdf
 ```
 
+Also available: `mv`, `mkdir`, `rmdir`, `cat`, `find`, `stat`, `tree`, `touch`, `du` — plus `tup backup <alias>` to push the VFS index into the chat itself.
+
 ## Updates
 
 `tup` comes with a built-in self-updater. Just run:
@@ -65,10 +75,12 @@ It will automatically fetch and install the latest binary from GitHub!
 
 ## Development
 
-Built natively in Go using `cobra` and `gotd/td`.
+Built natively in Go using `cobra`, `gotd/td`, `pterm`, and a pure-Go SQLite (`modernc.org/sqlite`) — zero CGO, so it cross-compiles everywhere.
 
 ```bash
 git clone https://github.com/ernsoylu/tup
 cd tup
 go build ./cmd/tup
 ```
+
+Releases are built by GoReleaser for macOS (Intel & Apple Silicon), Linux (amd64 & arm64), and Windows: pushing a `v*` tag triggers the release workflow. CI runs `go vet`, tests, and `golangci-lint` on every PR.
