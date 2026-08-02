@@ -73,10 +73,7 @@ func UploadFileMTProto(ctx context.Context, localPath, chatIDStr string) error {
 
 		pterm.Info.Printf("Resolving peer %s...\n", chatIDStr)
 		// Try resolving the peer
-		peer, err := sender.ResolveDomain(chatIDStr, message.ResolveOptions{})
-		if err != nil {
-			return fmt.Errorf("could not resolve chat: %w", err)
-		}
+		req := sender.Resolve(chatIDStr)
 
 		pterm.Info.Printf("Uploading %s to Telegram (up to 2GB)...\n", localPath)
 
@@ -93,7 +90,7 @@ func UploadFileMTProto(ctx context.Context, localPath, chatIDStr string) error {
 
 		pterm.Info.Println("Upload complete, finalizing message...")
 
-		msg, err := sender.To(peer).Document(ctx, upload)
+		msg, err := req.File(ctx, upload)
 		if err != nil {
 			return fmt.Errorf("failed to send document: %w", err)
 		}
