@@ -71,6 +71,40 @@ func SyncDrive(ctx context.Context, alias string) error {
 			return fmt.Errorf("peer resolution failed: %w", err)
 		}
 
+		// Safety check: verify if top message ID in chat is smaller than local lastMsgID (chat was cleared/recreated)
+		if lastMsgID > 0 {
+			latestRes, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+				Peer:  peer,
+				Limit: 1,
+			})
+			if err == nil {
+				var topMsgID int
+				switch m := latestRes.(type) {
+				case *tg.MessagesMessages:
+					if len(m.Messages) > 0 {
+						topMsgID = m.Messages[0].GetID()
+					}
+				case *tg.MessagesMessagesSlice:
+					if len(m.Messages) > 0 {
+						topMsgID = m.Messages[0].GetID()
+					}
+				case *tg.MessagesChannelMessages:
+					if len(m.Messages) > 0 {
+						topMsgID = m.Messages[0].GetID()
+					}
+				}
+				if topMsgID > 0 && topMsgID < lastMsgID {
+					pterm.Warning.Printf("Chat history reset detected (top msg #%d < local #%d). Clearing local VFS cache...\n", topMsgID, lastMsgID)
+					_, _ = core.DB.Exec("DELETE FROM vfs_entries WHERE alias = ?", alias)
+					_, _ = core.DB.Exec("DELETE FROM vfs_conflicts WHERE alias = ?", alias)
+					_, _ = core.DB.Exec("DELETE FROM vfs_operations_log WHERE alias = ?", alias)
+					lastMsgID = 0
+					headHash = ""
+					_ = UpdateSyncState(alias, 0, "")
+				}
+			}
+		}
+
 		// Fetch history since lastMsgID
 		res, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
 			Peer:  peer,
@@ -214,6 +248,12 @@ func ApplyOperation(alias string, op *Operation) error {
 					message_id = excluded.message_id
 			`, alias, parentID, fileName, op.Size, op.Sha256, op.MessageID)
 		}
+
+	case OpFORMAT:
+		// Format operation clears all local VFS entries and pending conflicts
+		_, _ = tx.Exec("DELETE FROM vfs_entries WHERE alias = ?", alias)
+		_, _ = tx.Exec("DELETE FROM vfs_conflicts WHERE alias = ?", alias)
+		_, _ = tx.Exec("DELETE FROM vfs_operations_log WHERE alias = ?", alias)
 	}
 
 	if err != nil {

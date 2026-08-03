@@ -2,6 +2,8 @@ package telegram
 
 import (
 	"context"
+	crand "crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"strconv"
 	"time"
@@ -132,5 +134,22 @@ func FormatChat(ctx context.Context, chatIDStr string) error {
 	}
 
 	pterm.Success.Printf("Format complete! Deleted %d messages total.\n", totalDeleted)
+
+	// Send OpFORMAT marker payload so other devices auto-reset their local VFS database on sync
+	op := &Operation{
+		Op:   OpFORMAT,
+		Path: "/",
+	}
+	if payload, err := op.Encode(); err == nil {
+		var randBuf [8]byte
+		_, _ = crand.Read(randBuf[:])
+		randomID := int64(binary.LittleEndian.Uint64(randBuf[:]))
+		_, _ = api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+			Peer:     peer,
+			Message:  payload,
+			RandomID: randomID,
+		})
+	}
+
 	return nil
 }

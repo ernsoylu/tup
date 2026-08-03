@@ -20,6 +20,7 @@ const (
 	OpMV       OpType = "MV"
 	OpSNAPSHOT OpType = "SNAPSHOT"
 	OpRESOLVE  OpType = "RESOLVE"
+	OpFORMAT   OpType = "FORMAT"
 )
 
 type Operation struct {
