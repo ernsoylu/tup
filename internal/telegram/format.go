@@ -14,7 +14,8 @@ import (
 )
 
 // FormatChat deletes every message in a chat. This is irreversible.
-// It automatically handles FLOOD_WAIT rate limits and prevents infinite loops on non-deletable system messages.
+// It automatically handles FLOOD_WAIT rate limits, paginates through history,
+// and prevents infinite loops on non-deletable system messages.
 func FormatChat(ctx context.Context, chatIDStr string) error {
 	api := Client.API()
 
@@ -28,6 +29,7 @@ func FormatChat(ctx context.Context, chatIDStr string) error {
 	isChannel := id <= -1000000000000
 
 	totalDeleted := 0
+	offsetID := 0
 	attemptedIDs := make(map[int]bool)
 
 	for {
@@ -36,8 +38,9 @@ func FormatChat(ctx context.Context, chatIDStr string) error {
 		for {
 			var err error
 			res, err = api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
-				Peer:  peer,
-				Limit: 100,
+				Peer:     peer,
+				OffsetID: offsetID,
+				Limit:    100,
 			})
 			if err != nil {
 				if d, ok := telegram.AsFloodWait(err); ok {
@@ -65,9 +68,9 @@ func FormatChat(ctx context.Context, chatIDStr string) error {
 			break
 		}
 
-		// Collect message IDs and check if they've already been attempted
 		ids := make([]int, 0, len(messages))
-		newIDsFound := false
+		newIDs := make([]int, 0, len(messages))
+		lowestMsgID := offsetID
 
 		for _, msg := range messages {
 			var msgID int
@@ -79,20 +82,27 @@ func FormatChat(ctx context.Context, chatIDStr string) error {
 			}
 
 			if msgID != 0 {
-				if !attemptedIDs[msgID] {
-					newIDsFound = true
-					attemptedIDs[msgID] = true
-				}
 				ids = append(ids, msgID)
+				if !attemptedIDs[msgID] {
+					attemptedIDs[msgID] = true
+					newIDs = append(newIDs, msgID)
+				}
+				if lowestMsgID == 0 || msgID < lowestMsgID {
+					lowestMsgID = msgID
+				}
 			}
 		}
 
-		// If no new deletable messages were found (i.e. all remaining messages are system creation messages that Telegram won't delete), stop
-		if !newIDsFound || len(ids) == 0 {
-			break
+		// If no unattempted messages in this batch, page deeper via offsetID
+		if len(newIDs) == 0 {
+			if lowestMsgID == offsetID || lowestMsgID == 0 {
+				break
+			}
+			offsetID = lowestMsgID
+			continue
 		}
 
-		// Delete the batch with FLOOD_WAIT retry
+		// Delete the new messages with FLOOD_WAIT retry
 		for {
 			var err error
 			if isChannel {
@@ -105,12 +115,12 @@ func FormatChat(ctx context.Context, chatIDStr string) error {
 						ChannelID:  channelPeer.ChannelID,
 						AccessHash: channelPeer.AccessHash,
 					},
-					ID: ids,
+					ID: newIDs,
 				})
 			} else {
 				_, err = api.MessagesDeleteMessages(ctx, &tg.MessagesDeleteMessagesRequest{
 					Revoke: true,
-					ID:     ids,
+					ID:     newIDs,
 				})
 			}
 
@@ -121,16 +131,17 @@ func FormatChat(ctx context.Context, chatIDStr string) error {
 					time.Sleep(waitDur)
 					continue
 				}
-				return fmt.Errorf("failed to delete messages: %w", err)
+				pterm.Warning.Printf("Failed to delete batch of %d messages: %v\n", len(newIDs), err)
+				break
 			}
 			break
 		}
 
-		totalDeleted += len(ids)
+		totalDeleted += len(newIDs)
 		pterm.Info.Printf("Deleted %d messages so far...\n", totalDeleted)
 
-		// 1 second delay between batches to be respectful of Telegram rate limits
-		time.Sleep(1 * time.Second)
+		// Brief delay between batches to be respectful of Telegram rate limits
+		time.Sleep(500 * time.Millisecond)
 	}
 
 	pterm.Success.Printf("Format complete! Deleted %d messages total.\n", totalDeleted)
