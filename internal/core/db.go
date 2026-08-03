@@ -47,6 +47,41 @@ func InitDB() error {
 		message_id INTEGER,
 		FOREIGN KEY (alias) REFERENCES drive_aliases(alias),
 		UNIQUE(alias, parent_id, name)
+	);
+
+	CREATE TABLE IF NOT EXISTS sync_state (
+		alias TEXT PRIMARY KEY,
+		last_synced_msg_id INTEGER NOT NULL DEFAULT 0,
+		head_hash TEXT,
+		last_synced_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS vfs_operations_log (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		alias TEXT NOT NULL,
+		msg_id INTEGER NOT NULL,
+		hash TEXT NOT NULL,
+		prev_hash TEXT,
+		op_type TEXT NOT NULL,
+		path TEXT NOT NULL,
+		target_path TEXT,
+		size INTEGER,
+		sha256 TEXT,
+		timestamp INTEGER NOT NULL,
+		UNIQUE(alias, msg_id)
+	);
+
+	CREATE TABLE IF NOT EXISTS vfs_conflicts (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		alias TEXT NOT NULL,
+		path TEXT NOT NULL,
+		conflict_type TEXT NOT NULL,
+		local_msg_id INTEGER,
+		local_hash TEXT,
+		remote_msg_id INTEGER NOT NULL,
+		remote_hash TEXT NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(alias, path)
 	);`
 
 	if _, err := db.Exec(schema); err != nil {
