@@ -111,19 +111,24 @@ var backupCmd = &cobra.Command{
 			return
 		}
 
-		pterm.Success.Printf("Backup generated locally (%d entries). Uploading to Telegram...\n", len(entries))
+		// Encode OpSNAPSHOT operation payload
+		op := &telegram.Operation{
+			Op:   telegram.OpSNAPSHOT,
+			Path: "/",
+		}
+		caption, _ := op.Encode()
 
-		// Upload back to the drive's chat
-		_, err = telegram.UploadFileMTProto(cmd.Context(), backupFile, chatID)
+		pterm.Success.Printf("Backup snapshot generated locally (%d entries). Uploading to Telegram...\n", len(entries))
+
+		// Upload back to the drive's chat with OpSNAPSHOT payload caption
+		msgID, err := telegram.UploadFileMTProtoWithCaption(cmd.Context(), backupFile, chatID, caption)
 		if err != nil {
 			pterm.Error.Println("Upload failed:", err)
 			return
 		}
 
-		// Note: We might want to edit the caption of this uploaded file to "#tup_backup"
-		// so we can easily search for it later when restoring.
-
-		pterm.Success.Println("VFS successfully backed up to Telegram!")
+		_ = telegram.UpdateSyncState(alias, msgID, op.Hash)
+		pterm.Success.Println("VFS snapshot successfully backed up to Telegram!")
 	},
 }
 

@@ -144,6 +144,11 @@ func resolvePeer(ctx context.Context, api *tg.Client, chatIDStr string) (tg.Inpu
 
 // UploadFileMTProto uploads a file using the MTProto 2GB engine and returns its Telegram Message ID.
 func UploadFileMTProto(ctx context.Context, localPath, chatIDStr string) (int, error) {
+	return UploadFileMTProtoWithCaption(ctx, localPath, chatIDStr, "")
+}
+
+// UploadFileMTProtoWithCaption uploads a file with an optional message caption payload.
+func UploadFileMTProtoWithCaption(ctx context.Context, localPath, chatIDStr, caption string) (int, error) {
 	var msgID int
 	err := Run(ctx, func(ctx context.Context) error {
 		api := Client.API()
@@ -176,6 +181,7 @@ func UploadFileMTProto(ctx context.Context, localPath, chatIDStr string) (int, e
 
 		updates, err := api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
 			Peer:     peer,
+			Message:  caption,
 			RandomID: randomID,
 			Media: &tg.InputMediaUploadedDocument{
 				File:     upload,

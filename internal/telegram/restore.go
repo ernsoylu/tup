@@ -2,10 +2,7 @@ package telegram
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"github.com/ernsoylu/tup/internal/core"
 	"github.com/pterm/pterm"
@@ -23,42 +20,10 @@ type VfsBackupEntry struct {
 	MessageID int    `json:"message_id"`
 }
 
-// SearchAndRestoreBackup looks for a backup file in the chat and rebuilds the VFS.
+// SearchAndRestoreBackup synchronizes the drive automatically over Telegram history and snapshots.
 func SearchAndRestoreBackup(ctx context.Context, alias, chatIDStr string) error {
-	return Run(ctx, func(ctx context.Context) error {
-		pterm.Info.Printf("Connecting to chat %s to search for backups...\n", chatIDStr)
-
-		// We simulate the download step since full MTProto search
-		// requires handling peer resolution and history pagination.
-
-		home, _ := os.UserHomeDir()
-		backupFile := filepath.Join(home, ".tup", fmt.Sprintf("tup_backup_%s.json", alias))
-
-		if _, err := os.Stat(backupFile); os.IsNotExist(err) {
-			pterm.Warning.Println("No backup found remotely. Starting with an empty VFS.")
-			return nil
-		}
-
-		pterm.Info.Println("Backup file located! Restoring VFS state...")
-
-		file, err := os.Open(backupFile)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = file.Close() }()
-
-		var entries []VfsBackupEntry
-		if err := json.NewDecoder(file).Decode(&entries); err != nil {
-			return fmt.Errorf("failed to parse backup JSON: %w", err)
-		}
-
-		if err := restoreToDB(entries); err != nil {
-			return err
-		}
-
-		pterm.Success.Printf("Successfully restored %d files to the VFS!\n", len(entries))
-		return nil
-	})
+	pterm.Info.Printf("Synchronizing drive '%s' with Telegram operations log...\n", alias)
+	return SyncDrive(ctx, alias)
 }
 
 func restoreToDB(entries []VfsBackupEntry) error {
