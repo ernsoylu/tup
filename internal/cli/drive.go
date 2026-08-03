@@ -185,12 +185,15 @@ var driveFormatCmd = &cobra.Command{
 			return
 		}
 
-		// Clear local VFS entries for this alias
+		// Clear local VFS entries and sync state for this alias
 		_, dbErr := core.DB.Exec("DELETE FROM vfs_entries WHERE alias = ?", alias)
+		_, _ = core.DB.Exec("DELETE FROM sync_state WHERE alias = ?", alias)
+		_, _ = core.DB.Exec("DELETE FROM vfs_operations_log WHERE alias = ?", alias)
+		_, _ = core.DB.Exec("DELETE FROM vfs_conflicts WHERE alias = ?", alias)
 		if dbErr != nil {
 			pterm.Warning.Println("Remote messages deleted but failed to clear local VFS:", dbErr)
 		} else {
-			pterm.Success.Printf("Local VFS entries for '%s' cleared.\n", alias)
+			pterm.Success.Printf("Local VFS entries and sync state for '%s' cleared.\n", alias)
 		}
 	},
 }
