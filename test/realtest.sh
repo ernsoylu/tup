@@ -288,6 +288,18 @@ run_test "cp help" cp --help
 run_test "ls help" ls --help
 run_test "find help" find --help
 run_test "du help" du --help
+run_test "sync help" sync --help
+run_test "conflicts help" conflicts --help
+run_test "resolve help" resolve --help
+
+# ── 13. Sync & Conflicts ────────────────────────────────────────────────
+
+section "Sync & Conflicts"
+
+run_test "sync drive" sync "$ALIAS"
+run_test "ls with --no-sync flag" --no-sync ls "$ROOT"
+run_test "conflicts list" conflicts "$ALIAS"
+run_test_expect_output "conflicts --json output" "\[" conflicts "$ALIAS" --json
 
 # ══════════════════════════════════════════════════════════════════════════
 # CLEANUP
