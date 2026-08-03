@@ -5,11 +5,12 @@
 ## Features
 
 - **POSIX Interface**: Use `tup cp`, `tup ls`, `tup rm`, `tup mkdir` exactly as you would natively.
+- **Git-Like Auto-Sync**: Seamless multi-device synchronization over Telegram event log. Changes on one device auto-sync to all other devices on the same account.
+- **Conflict Resolution**: Built-in conflict detection (`tup conflicts`) and interactive resolver (`tup resolve`).
 - **Chat Discovery**: Run `tup drive chats` to list your Telegram chats with their IDs — no external bots needed to find a Chat ID.
 - **Native 2GB Support**: Utilizes the `gotd/td` MTProto client to unlock Telegram's native 2GB file upload limits.
-- **VFS Backups**: Safely backup your drive's index into a JSON file embedded right in the chat or export directly via `tup backup <alias> --json`.
-- **JSON Export**: Machine-readable `--json` output support for `tup tree` and `tup backup` for AI tools and scripts.
-- **Instant Restore**: Connect to an existing drive on a new device, and it will auto-restore the VFS from the chat history.
+- **VFS Snapshots**: Fast-forward new devices via `tup backup <alias>` compaction snapshots or export metadata via `tup backup <alias> --json`.
+- **JSON Export**: Machine-readable `--json` output support for `tup tree`, `tup backup`, and `tup conflicts` for AI tools and scripts.
 - **AI Ready**: Run `tup ai` to generate instructions that teach LLMs (Cursor, Claude, Copilot, Antigravity) how to interact with your cloud files natively.
 
 ## Installation
@@ -45,17 +46,27 @@ Then register a Chat ID as an alias:
 tup drive add work <chat_id>
 tup drive list                 # show registered drives
 ```
-*(If a backup exists in this chat, `tup` will automatically restore your virtual file system cache!)*
+*(When registered on a new machine, `tup` will automatically sync the virtual file system from Telegram chat history!)*
 
-### 3. Use POSIX Commands
+### 3. POSIX Commands & Auto-Sync
 
-Now, just use standard syntax:
+Now, just use standard POSIX syntax. `tup` automatically keeps your local VFS in sync before commands:
 ```bash
 # Upload a file to Telegram
 tup cp ./local-report.pdf work:/docs/report.pdf
 
-# List remote files
+# List remote files (auto-syncs changes from other devices)
 tup ls work:/docs
+
+# Explicitly trigger drive sync
+tup sync work
+
+# List and resolve sync conflicts (if concurrent edits occurred)
+tup conflicts work
+tup resolve work:/docs/report.pdf --ours   # or --theirs / --keep-both
+
+# Run offline without network auto-sync
+tup --no-sync ls work:/docs
 
 # Download a file
 tup cp work:/docs/report.pdf ./downloaded.pdf
@@ -66,7 +77,7 @@ tup rm work:/docs/report.pdf
 # Machine-readable JSON tree (for AI agents & scripts)
 tup tree work:/ --json
 
-# Export drive VFS index as JSON
+# Export drive VFS index snapshot as JSON
 tup backup work --json
 ```
 
