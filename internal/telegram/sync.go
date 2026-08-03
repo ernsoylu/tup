@@ -12,10 +12,10 @@ import (
 )
 
 type ConflictError struct {
-	Alias      string
-	Path       string
-	Type       string
-	LocalMsgID int
+	Alias       string
+	Path        string
+	Type        string
+	LocalMsgID  int
 	RemoteMsgID int
 }
 
