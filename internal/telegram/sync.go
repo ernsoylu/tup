@@ -142,13 +142,13 @@ func SyncDrive(ctx context.Context, alias string) error {
 				}
 
 				text := msg.Message
-				if text == "" {
-					continue
-				}
-
 				op, err := DecodeOperation(text)
 				if err != nil {
-					continue
+					// Fallback: If message does not contain a TUP_OP payload, check if it's a manually uploaded document
+					op = extractManualDocumentOp(msg)
+					if op == nil {
+						continue
+					}
 				}
 
 				op.MessageID = msg.ID
@@ -322,4 +322,37 @@ func ApplyBatchOperations(alias string, ops []*Operation) error {
 	}
 
 	return tx.Commit()
+}
+
+func extractManualDocumentOp(msg *tg.Message) *Operation {
+	if msg == nil || msg.Media == nil {
+		return nil
+	}
+
+	docMedia, ok := msg.Media.(*tg.MessageMediaDocument)
+	if !ok || docMedia.Document == nil {
+		return nil
+	}
+
+	doc, ok := docMedia.Document.AsNotEmpty()
+	if !ok {
+		return nil
+	}
+
+	fileName := fmt.Sprintf("file_%d", msg.ID)
+	for _, attr := range doc.Attributes {
+		if fn, ok := attr.(*tg.DocumentAttributeFilename); ok && fn.FileName != "" {
+			fileName = fn.FileName
+			break
+		}
+	}
+
+	return &Operation{
+		Version:   1,
+		Op:        OpCP,
+		Path:      "/" + fileName,
+		Size:      doc.Size,
+		MessageID: msg.ID,
+		Timestamp: int64(msg.Date),
+	}
 }
