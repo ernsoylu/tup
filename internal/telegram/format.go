@@ -31,6 +31,7 @@ func FormatChat(ctx context.Context, chatIDStr string) error {
 	totalDeleted := 0
 	offsetID := 0
 	attemptedIDs := make(map[int]bool)
+	consecutiveEmptyBatches := 0
 
 	for {
 		// Fetch a batch of messages with FLOOD_WAIT retry
@@ -68,9 +69,8 @@ func FormatChat(ctx context.Context, chatIDStr string) error {
 			break
 		}
 
-		ids := make([]int, 0, len(messages))
 		newIDs := make([]int, 0, len(messages))
-		lowestMsgID := offsetID
+		highestMsgID := 0
 
 		for _, msg := range messages {
 			var msgID int
@@ -82,25 +82,26 @@ func FormatChat(ctx context.Context, chatIDStr string) error {
 			}
 
 			if msgID != 0 {
-				ids = append(ids, msgID)
+				if highestMsgID == 0 || msgID > highestMsgID {
+					highestMsgID = msgID
+				}
 				if !attemptedIDs[msgID] {
 					attemptedIDs[msgID] = true
 					newIDs = append(newIDs, msgID)
 				}
-				if lowestMsgID == 0 || msgID < lowestMsgID {
-					lowestMsgID = msgID
-				}
 			}
 		}
 
-		// If no unattempted messages in this batch, page deeper via offsetID
 		if len(newIDs) == 0 {
-			if lowestMsgID == offsetID || lowestMsgID == 0 {
-				break
+			consecutiveEmptyBatches++
+			if consecutiveEmptyBatches >= 3 {
+				offsetID = highestMsgID
+				consecutiveEmptyBatches = 0
 			}
-			offsetID = lowestMsgID
 			continue
 		}
+
+		consecutiveEmptyBatches = 0
 
 		// Delete the new messages with FLOOD_WAIT retry
 		for {
@@ -140,7 +141,9 @@ func FormatChat(ctx context.Context, chatIDStr string) error {
 		totalDeleted += len(newIDs)
 		pterm.Info.Printf("Deleted %d messages so far...\n", totalDeleted)
 
-		// Brief delay between batches to be respectful of Telegram rate limits
+		// Reset offsetID back to 0 so next iteration fetches remaining top messages
+		offsetID = 0
+
 		time.Sleep(500 * time.Millisecond)
 	}
 
