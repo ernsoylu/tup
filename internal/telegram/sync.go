@@ -66,7 +66,7 @@ func SyncDrive(ctx context.Context, alias string) error {
 
 	return Run(ctx, func(ctx context.Context) error {
 		api := Client.API()
-		peer, err := resolvePeer(ctx, api, chatID)
+		peer, err := ResolvePeer(ctx, api, chatID)
 		if err != nil {
 			return fmt.Errorf("peer resolution failed: %w", err)
 		}

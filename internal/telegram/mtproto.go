@@ -96,9 +96,9 @@ func (termAuth) Code(ctx context.Context, sentCode *tg.AuthSentCode) (string, er
 	return code, nil
 }
 
-// resolvePeer converts a Bot API style chat ID string to a tg.InputPeerClass.
+// ResolvePeer converts a Bot API style chat ID string to a tg.InputPeerClass.
 // Channel/supergroup IDs use the -100 prefix convention.
-func resolvePeer(ctx context.Context, api *tg.Client, chatIDStr string) (tg.InputPeerClass, error) {
+func ResolvePeer(ctx context.Context, api *tg.Client, chatIDStr string) (tg.InputPeerClass, error) {
 	id, err := strconv.ParseInt(chatIDStr, 10, 64)
 	if err != nil {
 		return nil, fmt.Errorf("invalid chat ID %q: %w", chatIDStr, err)
@@ -155,7 +155,7 @@ func UploadFileMTProtoWithCaption(ctx context.Context, localPath, chatIDStr, cap
 		u := uploader.NewUploader(api)
 
 		pterm.Info.Printf("Resolving peer %s...\n", chatIDStr)
-		peer, err := resolvePeer(ctx, api, chatIDStr)
+		peer, err := ResolvePeer(ctx, api, chatIDStr)
 		if err != nil {
 			return fmt.Errorf("peer resolution failed: %w", err)
 		}

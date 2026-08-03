@@ -20,7 +20,7 @@ func FormatChat(ctx context.Context, chatIDStr string) error {
 	api := Client.API()
 
 	pterm.Info.Printf("Resolving peer %s...\n", chatIDStr)
-	peer, err := resolvePeer(ctx, api, chatIDStr)
+	peer, err := ResolvePeer(ctx, api, chatIDStr)
 	if err != nil {
 		return fmt.Errorf("peer resolution failed: %w", err)
 	}
@@ -132,8 +132,7 @@ func FormatChat(ctx context.Context, chatIDStr string) error {
 					time.Sleep(waitDur)
 					continue
 				}
-				pterm.Warning.Printf("Failed to delete batch of %d messages: %v\n", len(newIDs), err)
-				break
+				return fmt.Errorf("failed to delete messages: %w (make sure your account has Admin 'Delete Messages' permissions in this group)", err)
 			}
 			break
 		}

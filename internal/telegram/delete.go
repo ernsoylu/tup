@@ -36,7 +36,7 @@ func DeleteMessages(ctx context.Context, chatIDStr string, messageIDs []int) err
 
 	return Run(ctx, func(ctx context.Context) error {
 		api := Client.API()
-		peer, err := resolvePeer(ctx, api, chatIDStr)
+		peer, err := ResolvePeer(ctx, api, chatIDStr)
 		if err != nil {
 			return fmt.Errorf("peer resolution failed: %w", err)
 		}
