@@ -17,6 +17,7 @@ Example: tup cp ~/file.txt work:/docs/`,
 }
 
 func init() {
-	// Root-level persistent flags (e.g., debug mode) can be added here
+	// Root-level persistent flags
 	RootCmd.PersistentFlags().BoolP("debug", "d", false, "enable debug logging")
+	RootCmd.PersistentFlags().Bool("no-sync", false, "disable automatic VFS synchronization with Telegram cloud log")
 }
